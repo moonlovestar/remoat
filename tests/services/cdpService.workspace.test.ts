@@ -131,12 +131,12 @@ describe('CdpService - Cross-Platform Workspace Launching', () => {
             await service.discoverAndConnectForWorkspace(workspacePath);
 
             expect(mockRunCommand).toHaveBeenCalledWith(
-                'C:\\Users\\TestUser\\AppData\\Local\\Programs\\Antigravity\\Antigravity.exe',
+                'C:\\Users\\TestUser\\AppData\\Local\\Programs\\Antigravity IDE\\Antigravity IDE.exe',
                 ['--remote-debugging-port=9999', '--new-window', workspacePath]
             );
         });
 
-        it('should fallback to Antigravity.exe if LOCALAPPDATA is missing on Windows', async () => {
+        it('should fallback to Antigravity IDE.exe if LOCALAPPDATA is missing on Windows', async () => {
             setPlatform('win32');
             delete process.env.LOCALAPPDATA;
 
@@ -154,7 +154,7 @@ describe('CdpService - Cross-Platform Workspace Launching', () => {
             await service.discoverAndConnectForWorkspace(workspacePath);
 
             expect(mockRunCommand).toHaveBeenCalledWith(
-                'Antigravity.exe',
+                'Antigravity IDE.exe',
                 ['--remote-debugging-port=9999', '--new-window', workspacePath]
             );
         });

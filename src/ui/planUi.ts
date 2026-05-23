@@ -88,7 +88,7 @@ export function buildPlanNotificationUI(
 ): PlanNotificationUI {
     const description = info.description || info.planSummary || 'A plan has been generated and is awaiting your review.';
     const planName = info.planTitle || 'Implementation Plan';
-    
+
     let typeLabel = 'Plan';
     if (planName.toLowerCase().includes('task')) typeLabel = 'Task';
     else if (planName.toLowerCase().includes('walkthrough')) typeLabel = 'Walkthrough';

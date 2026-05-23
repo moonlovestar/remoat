@@ -426,7 +426,7 @@ export class PlanningDetector {
     private lastNotifiedAt: number = 0;
     /** Cooldown period in ms to suppress duplicate notifications */
     private static readonly COOLDOWN_MS = 5000;
-    
+
     /** Click-guard state to prevent infinite auto-click loops on collapsed cards */
     private lastClickedChip: { text: string; at: number } | null = null;
 
@@ -597,10 +597,10 @@ export class PlanningDetector {
             }
 
             const result = await this.cdpService.call('Runtime.evaluate', callParams);
-            
+
             // Expected shape: PlanningInfo | PlanningInfo+fileRefMode | { collapsed: true, chipText } | { autoOpened: true, chipText } | null
             const payload = result?.result?.value ?? null;
-            
+
             if (payload && payload.collapsed) {
                 // We just initiated an auto-click on a collapsed chip
                 this.lastClickedChip = { text: payload.chipText, at: Date.now() };
@@ -625,7 +625,7 @@ export class PlanningDetector {
             if (info) {
                 // Clear click-guard state (successful expansion)
                 this.lastClickedChip = null;
-                
+
                 // Duplicate prevention: use button text + content preview as key (stable across DOM redraws, unique per plan)
                 const uniquePreview = `${info.planTitle}::${info.planSummary.slice(0, 50)}::${info.description.slice(0, 50)}`;
                 const key = `${info.openText}::${info.proceedText}::${uniquePreview}`;

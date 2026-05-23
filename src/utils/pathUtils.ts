@@ -1,7 +1,7 @@
 /**
  * Helper to resolve the correct Antigravity CLI executable path based on the operating system
  * and environment variables.
- * 
+ *
  * Precedence:
  * 1. process.env.ANTIGRAVITY_PATH (Explicit override)
  * 2. OS-specific default paths (Mac: /Applications/..., Windows: %LOCALAPPDATA%\..., Linux: 'antigravity')
@@ -19,9 +19,9 @@ export function getAntigravityCliPath(): string {
     if (process.platform === 'win32') {
         const localAppData = process.env.LOCALAPPDATA;
         if (localAppData) {
-            return `${localAppData}\\Programs\\Antigravity\\Antigravity.exe`;
+            return `${localAppData}\\Programs\\Antigravity IDE\\Antigravity IDE.exe`;
         }
-        return 'Antigravity.exe'; // Fallback if LOCALAPPDATA is undefined
+        return 'Antigravity IDE.exe'; // Fallback if LOCALAPPDATA is undefined
     }
 
     // Default for Linux or any unknown OS, assuming 'antigravity' is in the system PATH
@@ -50,7 +50,7 @@ export function getAntigravityCdpHint(port: number = 9222): string {
         case 'darwin':
             return `open -a ${APP_NAME} --args --remote-debugging-port=${port}`;
         case 'win32':
-            return `${APP_NAME}.exe --remote-debugging-port=${port}`;
+            return `Antigravity IDE.exe --remote-debugging-port=${port}`;
         default:
             return `${APP_NAME.toLowerCase()} --remote-debugging-port=${port}`;
     }

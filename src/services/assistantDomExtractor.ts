@@ -301,7 +301,7 @@ export function extractAssistantSegmentsPayloadScript(): string {
     var allBtns = Array.from(scope.querySelectorAll('button')).filter(function(b) { return b.offsetParent !== null; });
     var openBtn = allBtns.find(function(b) { var t = btnNorm15(b); return OPEN_PATS_15.some(function(p) { return t === p || t.includes(p); }); });
     var proceedBtn = allBtns.find(function(b) { var t = btnNorm15(b); return PROCEED_PATS_15.some(function(p) { return t === p || t.includes(p); }); });
-    
+
     if (openBtn) {
         var p = openBtn.parentElement;
         // If both buttons exist, walk up from proceedBtn to their common ancestor
@@ -315,7 +315,7 @@ export function extractAssistantSegmentsPayloadScript(): string {
             if (card) artifactCards.push(card);
         }
     }
-    
+
     var notifyCards = Array.from(scope.querySelectorAll('.notify-user-container'));
     for (var ni = 0; ni < notifyCards.length; ni++) {
         if (!artifactCards.includes(notifyCards[ni])) artifactCards.push(notifyCards[ni]);
@@ -330,10 +330,10 @@ export function extractAssistantSegmentsPayloadScript(): string {
         for (var mi = 0; mi < mdNodes.length; mi++) {
             var mdNode = mdNodes[mi];
             var clone = mdNode.cloneNode(true);
-            
+
             var cardBtns = clone.querySelectorAll('button');
             for(var b=0; b<cardBtns.length; b++) cardBtns[b].parentNode.removeChild(cardBtns[b]);
-            
+
             var pres = clone.querySelectorAll('pre');
             for (var pi = 0; pi < pres.length; pi++) {
                 var pre = pres[pi];
@@ -363,7 +363,7 @@ export function extractAssistantSegmentsPayloadScript(): string {
                     }
                 }
                 codeText = codeText.replace(/\\nCopy$/i, '').replace(/\\ncopy code$/i, '').trim();
-                
+
                 var newPre = document.createElement('pre');
                 var newCode = document.createElement('code');
                 if (lang) newCode.setAttribute('class', 'language-' + lang);
@@ -371,12 +371,12 @@ export function extractAssistantSegmentsPayloadScript(): string {
                 newPre.appendChild(newCode);
                 pre.parentNode.replaceChild(newPre, pre);
             }
-            
+
             var topStyles = clone.querySelectorAll('style, script');
             for (var tsi = 0; tsi < topStyles.length; tsi++) {
                 topStyles[tsi].parentNode.removeChild(topStyles[tsi]);
             }
-            
+
             var artifactHtml = clone.innerHTML;
             if (artifactHtml && artifactHtml.trim()) {
                 if (mdNodes[0] === card) {

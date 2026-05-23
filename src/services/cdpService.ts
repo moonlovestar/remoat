@@ -49,7 +49,7 @@ export interface UiSyncResult {
 /** Antigravity UI DOM selector constants */
 const SELECTORS = {
     /** Chat input box: textbox excluding xterm */
-    CHAT_INPUT: 'div[role="textbox"]:not(.xterm-helper-textarea)',
+    CHAT_INPUT: 'div[role="textbox"]:not(.xterm-helper-textarea), div[role="combobox"][contenteditable="true"]',
     /** Submit button search target tag */
     SUBMIT_BUTTON_CONTAINER: 'button',
     /** Submit icon SVG class candidates */
@@ -534,21 +534,21 @@ export class CdpService extends EventEmitter {
                     const t = titleEl.textContent;
                     if (t !== document.title) return { found: true, source: 'title-element', value: t };
                 }
-                
+
                 // Method 2: Check folder name in explorer view
                 const explorerItems = document.querySelectorAll('.explorer-item-label, .monaco-icon-label .label-name');
                 const folderNames = Array.from(explorerItems).map(e => (e.textContent || '').trim()).filter(Boolean);
                 if (folderNames.length > 0) return { found: true, source: 'explorer', value: folderNames.join(',') };
-                
+
                 // Method 3: Get path from tab titles or breadcrumbs
                 const breadcrumbs = document.querySelectorAll('.breadcrumbs-view .folder-icon, .tabs-breadcrumbs .label-name');
                 const crumbs = Array.from(breadcrumbs).map(e => (e.textContent || '').trim()).filter(Boolean);
                 if (crumbs.length > 0) return { found: true, source: 'breadcrumbs', value: crumbs.join(',') };
-                
+
                 // Method 4: Check body data-uri attribute, etc.
                 const bodyUri = document.body?.getAttribute('data-uri') || '';
                 if (bodyUri) return { found: true, source: 'data-uri', value: bodyUri };
-                
+
                 return { found: false };
             })()`;
 
@@ -703,10 +703,35 @@ export class CdpService extends EventEmitter {
 
     private async runCommand(command: string, args: string[]): Promise<void> {
         await new Promise<void>((resolve, reject) => {
+            const isDarwin = process.platform === 'darwin';
             const child = spawn(command, args, {
                 stdio: 'ignore',
-                shell: process.platform === 'win32',
+                detached: !isDarwin,
             });
+
+            if (!isDarwin) {
+                child.unref();
+                // Resolve after a short delay if it hasn't exited/errored.
+                // This prevents hanging if this is the primary instance (which stays running).
+                const timer = setTimeout(() => {
+                    resolve();
+                }, 500);
+
+                child.once('error', (error) => {
+                    clearTimeout(timer);
+                    reject(error);
+                });
+
+                child.once('close', (code) => {
+                    clearTimeout(timer);
+                    if (code === 0) {
+                        resolve();
+                    } else {
+                        reject(new Error(`${command} exited with code ${code ?? 'unknown'}`));
+                    }
+                });
+                return;
+            }
 
             child.once('error', (error) => {
                 reject(error);
@@ -927,7 +952,8 @@ export class CdpService extends EventEmitter {
      */
     private async focusChatInput(): Promise<{ ok: boolean; contextId?: number; error?: string }> {
         const focusScript = `(() => {
-            const editors = Array.from(document.querySelectorAll('${SELECTORS.CHAT_INPUT}'));
+            const container = document.querySelector('.antigravity-agent-side-panel') || document.querySelector('#conversation') || document;
+            const editors = Array.from(container.querySelectorAll('${SELECTORS.CHAT_INPUT}'));
             const visible = editors.filter(el => el.offsetParent !== null);
             const editor = visible[visible.length - 1];
             if (!editor) return { ok: false, error: 'No editor found' };
@@ -1545,13 +1571,25 @@ export class CdpService extends EventEmitter {
             throw new Error('Not connected to CDP.');
         }
 
-        // Antigravity 1.21.6+ uses <button> elements; older versions use <div>.
-        // Use tag-agnostic class-based selector to support both.
         const expression = `(async () => {
-            return Array.from(document.querySelectorAll('button, div'))
+            const triggerBtn = Array.from(document.querySelectorAll('button')).find(b => {
+                const t = (b.textContent || '').trim().toLowerCase();
+                return ['gemini', 'claude', 'gpt'].some(k => t.includes(k));
+            });
+            if (!triggerBtn) return [];
+
+            triggerBtn.click();
+            await new Promise(r => setTimeout(r, 500));
+
+            const models = Array.from(document.querySelectorAll('button, div'))
                 .filter(e => e.className.includes('px-2 py-1') && e.className.includes('w-full') && e.className.includes('items-center') && e.className.includes('justify-between'))
-                .map(e => (e.textContent || '').trim().replace(/New$/, '').trim())
+                .map(e => (e.textContent || '').trim().replace(/(New|Fast)$/, '').trim())
                 .filter(t => t.length > 0 && t.length < 60);
+
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            await new Promise(r => setTimeout(r, 200));
+
+            return models;
         })()`;
 
         try {
@@ -1583,16 +1621,17 @@ export class CdpService extends EventEmitter {
         if (!this.isConnectedFlag || !this.ws) {
             return null;
         }
-        // Antigravity 1.21.6+ uses <button> elements; older versions use <div>.
         const expression = `(() => {
-            var selected = Array.from(document.querySelectorAll('button, div'))
-                .find(e => e.className.includes('px-2 py-1') && e.className.includes('w-full') && e.className.includes('items-center') && e.className.includes('justify-between') && e.className.includes('bg-gray-500/20') && !e.className.includes('hover:bg-gray-500/20'));
-            return selected ? (selected.textContent || '').trim().replace(/New$/, '').trim() : null;
+            const btn = Array.from(document.querySelectorAll('button')).find(b => {
+                const t = (b.textContent || '').trim().toLowerCase();
+                return ['gemini', 'claude', 'gpt'].some(k => t.includes(k));
+            });
+            return btn ? (btn.textContent || '').trim() : null;
         })()`;
         try {
             const contextId = this.getPrimaryContextId();
             const res = await this.call('Runtime.evaluate', {
-                expression, returnByValue: true, awaitPromise: true,
+                expression, returnByValue: true, awaitPromise: false,
                 contextId: contextId || undefined
             });
             return res?.result?.value || null;
@@ -1612,14 +1651,28 @@ export class CdpService extends EventEmitter {
             throw new Error('Not connected to CDP. Call connect() first.');
         }
 
-        // Antigravity 1.21.6+ uses <button> elements; older versions use <div>.
-        // Tag-agnostic class-based selector supports both versions.
-        // textContent may have "New" suffix on newly added models.
         const safeModel = JSON.stringify(modelName);
         const expression = `(async () => {
-            const targetModel = ${safeModel};
+            const targetModel = ${safeModel}.toLowerCase();
+            const safeModelName = ${safeModel};
 
-            // Get all items in the model list (button in 1.21.6+, div in older)
+            const triggerBtn = Array.from(document.querySelectorAll('button')).find(b => {
+                const t = (b.textContent || '').trim().toLowerCase();
+                return ['gemini', 'claude', 'gpt'].some(k => t.includes(k));
+            });
+
+            let normalizedTargetForList = targetModel.replace(/[-]/g, ' ').replace('claude sonnet 4.6 thinking', 'claude sonnet 4.6 (thinking)').replace('claude opus 4.6 thinking', 'claude opus 4.6 (thinking)').replace('gpt oss 120b medium', 'gpt-oss 120b (medium)');
+
+            if (triggerBtn) {
+                const currentText = (triggerBtn.textContent || '').trim().toLowerCase();
+                if (currentText.includes(normalizedTargetForList) || normalizedTargetForList.includes(currentText)) {
+                    return { ok: true, model: safeModelName, alreadySelected: true };
+                }
+
+                triggerBtn.click();
+                await new Promise(r => setTimeout(r, 500));
+            }
+
             const modelItems = Array.from(document.querySelectorAll('button, div'))
                 .filter(e => e.className.includes('px-2 py-1') && e.className.includes('w-full') && e.className.includes('items-center') && e.className.includes('justify-between'));
 
@@ -1627,40 +1680,21 @@ export class CdpService extends EventEmitter {
                 return { ok: false, error: 'Model list not found. The dropdown may not be open.' };
             }
 
-            // Match target model by name (compare after removing New suffix)
             const targetItem = modelItems.find(el => {
-                const text = (el.textContent || '').trim().replace(/New$/, '').trim();
-                return text === targetModel || text.toLowerCase() === targetModel.toLowerCase();
+                const text = (el.textContent || '').trim().replace(/(New|Fast)$/, '').trim().toLowerCase();
+                return text === normalizedTargetForList || text.includes(normalizedTargetForList) || normalizedTargetForList.includes(text);
             });
 
             if (!targetItem) {
-                const available = modelItems.map(el => (el.textContent || '').trim().replace(/New$/, '').trim()).join(', ');
-                return { ok: false, error: 'Model "' + targetModel + '" not found. Available: ' + available };
+                const available = modelItems.map(el => (el.textContent || '').trim().replace(/(New|Fast)$/, '').trim()).join(', ');
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                return { ok: false, error: 'Model "' + safeModelName + '" not found. Available: ' + available };
             }
 
-            // Check if already selected
-            if (targetItem.className.includes('bg-gray-500/20') && !targetItem.className.includes('hover:bg-gray-500/20')) {
-                return { ok: true, model: targetModel, alreadySelected: true };
-            }
-
-            // Click to select model
             targetItem.click();
             await new Promise(r => setTimeout(r, 500));
 
-            // Verify selection was applied
-            const updatedItems = Array.from(document.querySelectorAll('button, div'))
-                .filter(e => e.className.includes('px-2 py-1') && e.className.includes('w-full') && e.className.includes('items-center') && e.className.includes('justify-between'));
-            const selectedItem = updatedItems.find(el => {
-                const text = (el.textContent || '').trim().replace(/New$/, '').trim();
-                return text === targetModel || text.toLowerCase() === targetModel.toLowerCase();
-            });
-
-            if (selectedItem && selectedItem.className.includes('bg-gray-500/20') && !selectedItem.className.includes('hover:bg-gray-500/20')) {
-                return { ok: true, model: targetModel, verified: true };
-            }
-
-            // Click succeeded but verification failed
-            return { ok: true, model: targetModel, verified: false };
+            return { ok: true, model: safeModelName, verified: true };
         })()`;
 
         try {
