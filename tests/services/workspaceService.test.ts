@@ -106,4 +106,31 @@ describe('WorkspaceService', () => {
             expect(() => service.getWorkspacePath('../outside')).toThrow('Path traversal detected');
         });
     });
+
+    describe('createProject', () => {
+        it('creates a new subdirectory and returns its full path', () => {
+            const fullPath = service.createProject('MyNewApp');
+            expect(fullPath).toBe(path.join(tmpDir, 'MyNewApp'));
+            expect(fs.existsSync(fullPath)).toBe(true);
+            expect(fs.statSync(fullPath).isDirectory()).toBe(true);
+        });
+
+        it('makes the new project visible via scanWorkspaces()', () => {
+            service.createProject('SomeProject');
+            expect(service.scanWorkspaces()).toContain('SomeProject');
+        });
+
+        it('throws if the project already exists', () => {
+            service.createProject('Existing');
+            expect(() => service.createProject('Existing')).toThrow('already exists');
+        });
+
+        it('rejects path traversal', () => {
+            expect(() => service.createProject('../escape')).toThrow('Path traversal detected');
+        });
+
+        it('rejects nested path traversal', () => {
+            expect(() => service.createProject('a/../../etc')).toThrow('Path traversal detected');
+        });
+    });
 });

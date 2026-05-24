@@ -5,6 +5,7 @@ import { escapeHtml } from '../utils/telegramFormatter';
 export const PROJECT_SELECT_ID = 'project_select';
 export const WORKSPACE_SELECT_ID = 'workspace_select';
 export const PROJECT_PAGE_PREFIX = 'project_page';
+export const NEW_PROJECT_BTN = 'new_project';
 export const ITEMS_PER_PAGE = 10;
 
 export function parseProjectPageId(customId: string): number {
@@ -20,6 +21,29 @@ export function isProjectSelectId(customId: string): boolean {
     );
 }
 
+/**
+ * Validate a new project name entered by the user.
+ * Returns ok:true on success, or ok:false with a reason string on failure.
+ */
+export function validateProjectName(
+    name: string,
+): { ok: true } | { ok: false; reason: string } {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed.length === 0) {
+        return { ok: false, reason: 'Name cannot be empty.' };
+    }
+    if (/[/\\:*?"<>|]/.test(trimmed)) {
+        return { ok: false, reason: 'Name contains invalid characters (/ \\ : * ? " < > |).' };
+    }
+    if (trimmed.startsWith('.')) {
+        return { ok: false, reason: 'Name cannot start with a dot.' };
+    }
+    if (trimmed.length > 100) {
+        return { ok: false, reason: 'Name is too long (max 100 characters).' };
+    }
+    return { ok: true };
+}
+
 export function buildProjectListUI(
     workspaces: string[],
     page: number = 0,
@@ -28,9 +52,11 @@ export function buildProjectListUI(
     const safePage = Math.max(0, Math.min(page, totalPages - 1));
 
     if (workspaces.length === 0) {
+        const keyboard = new InlineKeyboard()
+            .text('➕ New Project', NEW_PROJECT_BTN).row();
         return {
             text: `<b>📁 Projects</b>\n\n${t('No projects found.')}`,
-            keyboard: new InlineKeyboard(),
+            keyboard,
         };
     }
 
@@ -66,6 +92,8 @@ export function buildProjectListUI(
         }
         keyboard.row();
     }
+
+    keyboard.text('➕ New Project', NEW_PROJECT_BTN).row();
 
     return { text, keyboard };
 }

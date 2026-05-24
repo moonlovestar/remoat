@@ -6,6 +6,8 @@ import {
     PROJECT_SELECT_ID,
     WORKSPACE_SELECT_ID,
     ITEMS_PER_PAGE,
+    NEW_PROJECT_BTN,
+    validateProjectName,
 } from '../../src/ui/projectListUi';
 import { InlineKeyboard } from 'grammy';
 
@@ -112,6 +114,73 @@ describe('projectListUi', () => {
             const { text } = buildProjectListUI(workspaces, 0);
 
             expect(text).not.toContain('Page');
+        });
+
+        it('always includes the New Project button when list is empty', () => {
+            const { keyboard } = buildProjectListUI([], 0);
+            const flat = keyboard.inline_keyboard.flat();
+            expect(flat.some(btn => (btn as any).callback_data === NEW_PROJECT_BTN)).toBe(true);
+        });
+
+        it('always includes the New Project button for non-empty lists', () => {
+            const { keyboard } = buildProjectListUI(makeWorkspaces(3), 0);
+            const flat = keyboard.inline_keyboard.flat();
+            expect(flat.some(btn => (btn as any).callback_data === NEW_PROJECT_BTN)).toBe(true);
+        });
+    });
+
+    describe('validateProjectName', () => {
+        it('accepts a normal project name', () => {
+            expect(validateProjectName('MyProject')).toEqual({ ok: true });
+        });
+
+        it('accepts names with dashes and underscores', () => {
+            expect(validateProjectName('my-app_v2')).toEqual({ ok: true });
+        });
+
+        it('rejects an empty string', () => {
+            const result = validateProjectName('');
+            expect(result.ok).toBe(false);
+            if (!result.ok) expect(result.reason).toContain('empty');
+        });
+
+        it('rejects a whitespace-only string', () => {
+            const result = validateProjectName('   ');
+            expect(result.ok).toBe(false);
+        });
+
+        it('rejects names with path separator /', () => {
+            const result = validateProjectName('foo/bar');
+            expect(result.ok).toBe(false);
+            if (!result.ok) expect(result.reason).toContain('invalid characters');
+        });
+
+        it('rejects names with path separator \\', () => {
+            const result = validateProjectName('foo\\bar');
+            expect(result.ok).toBe(false);
+        });
+
+        it('rejects names with Windows reserved characters', () => {
+            for (const ch of [':', '*', '?', '"', '<', '>', '|']) {
+                const result = validateProjectName(`bad${ch}name`);
+                expect(result.ok).toBe(false);
+            }
+        });
+
+        it('rejects names starting with a dot', () => {
+            const result = validateProjectName('.hidden');
+            expect(result.ok).toBe(false);
+            if (!result.ok) expect(result.reason).toContain('dot');
+        });
+
+        it('rejects names longer than 100 characters', () => {
+            const result = validateProjectName('a'.repeat(101));
+            expect(result.ok).toBe(false);
+            if (!result.ok) expect(result.reason).toContain('long');
+        });
+
+        it('accepts names exactly 100 characters long', () => {
+            expect(validateProjectName('a'.repeat(100))).toEqual({ ok: true });
         });
     });
 });

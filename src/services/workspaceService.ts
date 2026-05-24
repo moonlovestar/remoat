@@ -63,4 +63,18 @@ export class WorkspaceService {
         const fullPath = this.validatePath(workspaceName);
         return fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory();
     }
+
+    /**
+     * Create a new subdirectory under baseDir with the given name.
+     * @returns the full absolute path of the created directory
+     * @throws if the name is invalid (path traversal) or the directory already exists
+     */
+    public createProject(name: string): string {
+        const fullPath = this.validatePath(name); // path traversal guard
+        if (fs.existsSync(fullPath)) {
+            throw new Error(`Project "${name}" already exists.`);
+        }
+        fs.mkdirSync(fullPath, { recursive: true });
+        return fullPath;
+    }
 }

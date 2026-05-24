@@ -1161,12 +1161,60 @@ export class CdpService extends EventEmitter {
     }
 
     /**
+     * Wait for the Antigravity UI to leave the "Authenticating" / loading splash
+     * and become ready for message injection.
+     *
+     * Polls the DOM every `pollIntervalMs` until:
+     *  - The chat input field is present, OR
+     *  - The authenticating/loading overlay text disappears.
+     *
+     * @param maxWaitMs      Maximum wait time (ms). Default: 60000
+     * @param pollIntervalMs Polling interval (ms). Default: 1000
+     * @returns true when the UI appears ready, false on timeout
+     */
+    async waitForUiReady(maxWaitMs = 60_000, pollIntervalMs = 1_000): Promise<boolean> {
+        const start = Date.now();
+        // NOTE: the script uses single-quote strings only to avoid backtick/escape issues
+        const script = '(() => {'
+            + ' const body = document.body;'
+            + ' if (!body) return { ready: false, reason: \'no-body\' };'
+            + ' const text = (body.innerText || \'\').toLowerCase();'
+            + ' const isAuthScreen = /authenticating|signing in|initializing|loading\\.\\.\\./.test(text)'
+            + '     && text.length < 500;'
+            + ' if (isAuthScreen) return { ready: false, reason: \'auth-screen\' };'
+            + ' const hasChatInput = !!document.querySelector('
+            + '   \'div[role="textbox"], div[role="combobox"][contenteditable="true"], #conversation\''
+            + ' );'
+            + ' return { ready: hasChatInput, reason: hasChatInput ? \'chat-input-found\' : \'no-input-yet\' };'
+            + '})()';
+
+        while (Date.now() - start < maxWaitMs) {
+            try {
+                const res = await this.call('Runtime.evaluate', {
+                    expression: script,
+                    returnByValue: true,
+                });
+                const value = res?.result?.value;
+                if (value?.ready === true) return true;
+                logger.debug(`[CdpService] waitForUiReady: not ready (${value?.reason ?? 'unknown'})`);
+            } catch {
+                // WebSocket may not be fully settled; keep polling
+            }
+            await new Promise(r => setTimeout(r, pollIntervalMs));
+        }
+
+        logger.warn('[CdpService] waitForUiReady: timed out waiting for UI to become ready');
+        return false;
+    }
+
+    /**
      * Inject and send the specified text into Antigravity's chat input field.
      *
      * Strategy:
-     *   1. Focus editor via Runtime.evaluate
-     *   2. Input text via CDP Input.insertText
-     *   3. Send via CDP Input.dispatchKeyEvent(Enter)
+     *   1. Wait for the UI to leave the auth/loading screen
+     *   2. Focus editor via Runtime.evaluate
+     *   3. Input text via CDP Input.insertText
+     *   4. Send via CDP Input.dispatchKeyEvent(Enter)
      *
      * Using CDP Input API instead of DOM manipulation ensures reliable
      * delivery to Cascade panel's React/framework event handlers.
@@ -1174,6 +1222,14 @@ export class CdpService extends EventEmitter {
     async injectMessage(text: string): Promise<InjectResult> {
         if (!this.isConnectedFlag || !this.ws) {
             throw new Error('Not connected to CDP. Call connect() first.');
+        }
+
+        const uiReady = await this.waitForUiReady();
+        if (!uiReady) {
+            return {
+                ok: false,
+                error: 'Antigravity UI is not ready (still authenticating or loading). Please wait and try again.',
+            };
         }
 
         const focusResult = await this.focusChatInput();
@@ -1200,6 +1256,14 @@ export class CdpService extends EventEmitter {
     async injectMessageWithImageFiles(text: string, imageFilePaths: string[]): Promise<InjectResult> {
         if (!this.isConnectedFlag || !this.ws) {
             throw new Error('Not connected to CDP. Call connect() first.');
+        }
+
+        const uiReady = await this.waitForUiReady();
+        if (!uiReady) {
+            return {
+                ok: false,
+                error: 'Antigravity UI is not ready (still authenticating or loading). Please wait and try again.',
+            };
         }
 
         const focusResult = await this.focusChatInput();

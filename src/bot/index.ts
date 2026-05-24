@@ -62,7 +62,7 @@ import { buildModelsUI, sendModelsUI } from '../ui/modelsUi';
 import { sendTemplateUI, TEMPLATE_BTN_PREFIX, parseTemplateButtonId } from '../ui/templateUi';
 import { sendAutoAcceptUI, AUTOACCEPT_BTN_ON, AUTOACCEPT_BTN_OFF, AUTOACCEPT_BTN_REFRESH } from '../ui/autoAcceptUi';
 import { handleScreenshot } from '../ui/screenshotUi';
-import { buildProjectListUI, PROJECT_SELECT_ID, PROJECT_PAGE_PREFIX, parseProjectPageId } from '../ui/projectListUi';
+import { buildProjectListUI, PROJECT_SELECT_ID, PROJECT_PAGE_PREFIX, parseProjectPageId, NEW_PROJECT_BTN, validateProjectName } from '../ui/projectListUi';
 import { buildSessionPickerUI, SESSION_SELECT_ID, isSessionSelectId } from '../ui/sessionPickerUi';
 import {
     PLAN_VIEW_BTN, PLAN_PROCEED_BTN, PLAN_EDIT_BTN, PLAN_REFRESH_BTN, PLAN_PAGE_PREFIX,
@@ -135,6 +135,8 @@ const userStopRequestedChannels = new Set<string>();
 
 /** Channels where the user is expected to type plan edit instructions */
 const planEditPendingChannels = new Map<string, { projectName: string }>();
+/** Channels where the user is expected to type a new project name */
+const newProjectPendingChannels = new Set<string>();
 /** Cached plan content pages per channel */
 const planContentCache = new Map<string, string[]>();
 
@@ -501,7 +503,16 @@ async function sendPromptToAntigravity(
 
         if (!injectResult.ok) {
             isFinalized = true;
-            await sendEmbed(`${PHASE_ICONS.error} Message Injection Failed`, `Failed to send message: ${injectResult.error}`);
+            const isNotReady = injectResult.error?.toLowerCase().includes('not ready')
+                || injectResult.error?.toLowerCase().includes('authenticating');
+            if (isNotReady) {
+                await sendEmbed(
+                    `⏳ IDE Not Ready`,
+                    `Antigravity is still starting up.\nPlease wait a moment and try again.`,
+                );
+            } else {
+                await sendEmbed(`${PHASE_ICONS.error} Message Injection Failed`, `Failed to send message: ${injectResult.error}`);
+            }
             return;
         }
 
@@ -1410,6 +1421,19 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             return;
         }
 
+        // New project button — prompt user for a project name
+        if (data === NEW_PROJECT_BTN) {
+            const key = channelKey(ch);
+            newProjectPendingChannels.add(key);
+            await ctx.answerCallbackQuery();
+            await bot.api.sendMessage(
+                ch.chatId,
+                '<b>➕ New Project</b>\n\nEnter the name for the new project directory:\n<i>Send /cancel to abort.</i>',
+                { parse_mode: 'HTML', message_thread_id: ch.threadId },
+            );
+            return;
+        }
+
         // Project selection
         if (data.startsWith(`${PROJECT_SELECT_ID}:`)) {
             const workspacePath = data.replace(`${PROJECT_SELECT_ID}:`, '');
@@ -1830,6 +1854,35 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         const text = ctx.message.text.trim();
 
         if (!text) return;
+
+        // New project name interception
+        if (newProjectPendingChannels.has(key)) {
+            newProjectPendingChannels.delete(key);
+
+            if (text === '/cancel') {
+                await ctx.reply('❌ New project cancelled.');
+                return;
+            }
+
+            const validation = validateProjectName(text);
+            if (!validation.ok) {
+                await replyHtml(ctx, `⚠️ Invalid name: ${escapeHtml(validation.reason)}`);
+                return;
+            }
+
+            try {
+                const fullPath = workspaceService.createProject(text.trim());
+                const workspaces = workspaceService.scanWorkspaces();
+                const { text: listText, keyboard } = buildProjectListUI(workspaces, 0);
+                await replyHtml(ctx,
+                    `✅ <b>Project created:</b> <code>${escapeHtml(text.trim())}</code>\n<code>${escapeHtml(fullPath)}</code>\n\nSelect it from the list below:`,
+                );
+                await replyHtml(ctx, listText, keyboard);
+            } catch (e: any) {
+                await replyHtml(ctx, `❌ Failed to create project: ${escapeHtml(e.message)}`);
+            }
+            return;
+        }
 
         // Plan edit interception
         const pendingPlanEdit = planEditPendingChannels.get(key);
