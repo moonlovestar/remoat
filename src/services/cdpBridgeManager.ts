@@ -188,8 +188,8 @@ export function parseErrorPopupCustomId(customId: string): { action: 'dismiss' |
 export function initCdpBridge(autoApproveDefault: boolean): CdpBridge {
     const pool = new CdpConnectionPool({
         cdpCallTimeout: 15000,
-        maxReconnectAttempts: 3,
-        reconnectDelayMs: 3000,
+        maxReconnectAttempts: 10,
+        reconnectDelayMs: 5000,
     });
 
     const quota = new QuotaService();

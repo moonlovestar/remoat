@@ -803,6 +803,7 @@ export class CdpService extends EventEmitter {
         this.stopHeartbeat();
         if (!this.ws) return;
         this.lastPongTime = Date.now();
+        let lastHeartbeatAt = Date.now();
 
         this.ws.on('pong', () => {
             this.lastPongTime = Date.now();
@@ -812,6 +813,16 @@ export class CdpService extends EventEmitter {
             if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
                 this.stopHeartbeat();
                 return;
+            }
+            const now = Date.now();
+            const timeSinceLastBeat = now - lastHeartbeatAt;
+            lastHeartbeatAt = now;
+            // If >45s elapsed since the last heartbeat tick, the process was likely
+            // suspended by the OS (e.g. laptop lid closed). Reset the pong timestamp
+            // so we do not immediately kill a still-valid connection on wake.
+            if (timeSinceLastBeat > 45_000) {
+                logger.warn('[CdpService] Heartbeat: system sleep detected — resetting pong timer');
+                this.lastPongTime = now;
             }
             if (Date.now() - this.lastPongTime > 40_000) {
                 logger.error('[CdpService] Heartbeat: no pong in 40s — terminating WebSocket');
@@ -860,8 +871,11 @@ export class CdpService extends EventEmitter {
                 `[CdpService] Reconnect attempt ${this.reconnectAttemptCount}/${this.maxReconnectAttempts}...`
             );
 
-            // Add delay between attempts
-            await new Promise(r => setTimeout(r, this.reconnectDelayMs));
+            // Exponential backoff: delay = min(base * 2^(attempt-1), 15s)
+            // Early attempts are fast; later attempts give the IDE more time to wake from sleep.
+            const delay = Math.min(this.reconnectDelayMs * Math.pow(2, this.reconnectAttemptCount - 1), 15_000);
+            logger.debug(`[CdpService] Reconnect delay: ${delay}ms`);
+            await new Promise(r => setTimeout(r, delay));
 
             try {
                 this.contexts = [];
@@ -875,6 +889,11 @@ export class CdpService extends EventEmitter {
                 this.reconnectAttemptCount = 0;
                 this.isReconnecting = false;
                 this.emit('reconnected');
+                // Proactively warm up the UI after reconnect so it is ready for the
+                // next message injection (non-blocking — runs in the background).
+                this.waitForUiReady().then(ready => {
+                    if (!ready) logger.warn('[CdpService] UI not ready after reconnect — next inject may be slow');
+                }).catch(() => {});
                 return;
             } catch (err) {
                 logger.error('[CdpService] Reconnect failed:', err);
