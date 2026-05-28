@@ -30,30 +30,52 @@ export interface ApprovalDetectorOptions {
  * Detects allow/deny button pairs and extracts descriptions with fallbacks.
  */
 const DETECT_APPROVAL_SCRIPT = `(() => {
-    const ALLOW_ONCE_PATTERNS = ['allow once', 'allow one time', '今回のみ許可', '1回のみ許可', '一度許可'];
+    // --- Text pattern sets (ordered from most-specific to most-general) ---
+    const ALLOW_ONCE_PATTERNS = [
+        'yes, allow this time',
+        'yes, allow once',
+        'allow once',
+        'allow one time',
+        '今回のみ許可',
+        '1回のみ許可',
+        '一度許可',
+    ];
     const ALWAYS_ALLOW_PATTERNS = [
+        'yes, and always allow',
+        'yes, always allow',
         'allow this conversation',
         'allow this chat',
         'always allow',
         '常に許可',
         'この会話を許可',
     ];
-    const ALLOW_PATTERNS = ['allow', 'permit', 'run', 'execute', '許可', '承認', '確認', '実行'];
-    const DENY_PATTERNS = ['deny', 'reject', '拒否', 'decline', '却下'];
+    const ALLOW_PATTERNS = ['yes, allow', 'allow', 'permit', 'run', 'execute', '許可', '承認', '確認', '実行'];
+    const DENY_PATTERNS = ['no (', 'no,', 'no.', 'deny', 'reject', '拒否', 'decline', '却下', 'skip'];
 
     const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
 
-    const allButtons = Array.from(document.querySelectorAll('button'))
-        .filter(btn => btn.offsetParent !== null);
+    // Collect all visible interactive elements — buttons AND list/option items
+    const CLICKABLE_SELECTORS = [
+        'button',
+        '[role="option"]',
+        '[role="listitem"]',
+        '[role="menuitem"]',
+        'li[tabindex]',
+        '[class*="option"][tabindex]',
+        '[class*="item"][tabindex]',
+    ];
+    const allInteractive = Array.from(
+        document.querySelectorAll(CLICKABLE_SELECTORS.join(','))
+    ).filter(el => el.offsetParent !== null);
 
-    let approveBtn = allButtons.find(btn => {
-        const t = normalize(btn.textContent || '');
+    let approveBtn = allInteractive.find(el => {
+        const t = normalize(el.textContent || '');
         return ALLOW_ONCE_PATTERNS.some(p => t.includes(p));
     }) || null;
 
     if (!approveBtn) {
-        approveBtn = allButtons.find(btn => {
-            const t = normalize(btn.textContent || '');
+        approveBtn = allInteractive.find(el => {
+            const t = normalize(el.textContent || '');
             const isAlways = ALWAYS_ALLOW_PATTERNS.some(p => t.includes(p));
             return !isAlways && ALLOW_PATTERNS.some(p => t.includes(p));
         }) || null;
@@ -61,13 +83,17 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
 
     if (!approveBtn) return null;
 
-    let container = approveBtn.closest('[role="dialog"], .modal, .dialog, .approval-container, .permission-dialog');
+    // Find container: prefer an ancestor with a role=dialog/modal class,
+    // fall back to walking up until we find a sibling deny element.
+    let container = approveBtn.closest(
+        '[role="dialog"], .modal, .dialog, .approval-container, .permission-dialog, [class*="permission"], [class*="approval"]'
+    );
     if (!container) {
-        // Walk up ancestors until we find one that also contains a deny button
         let el = approveBtn.parentElement;
-        for (let i = 0; i < 6 && el && el !== document.body; i++) {
-            const btns = Array.from(el.querySelectorAll('button')).filter(b => b.offsetParent !== null);
-            if (btns.some(b => DENY_PATTERNS.some(p => normalize(b.textContent || '').includes(p)))) {
+        for (let i = 0; i < 8 && el && el !== document.body; i++) {
+            const candidates = Array.from(el.querySelectorAll(CLICKABLE_SELECTORS.join(',')))
+                .filter(b => b.offsetParent !== null);
+            if (candidates.some(b => DENY_PATTERNS.some(p => normalize(b.textContent || '').includes(p)))) {
                 container = el;
                 break;
             }
@@ -76,18 +102,19 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
     }
     if (!container) container = document.body;
 
-    const containerButtons = Array.from(container.querySelectorAll('button'))
-        .filter(btn => btn.offsetParent !== null);
+    const containerItems = Array.from(
+        container.querySelectorAll(CLICKABLE_SELECTORS.join(','))
+    ).filter(el => el.offsetParent !== null);
 
-    const denyBtn = containerButtons.find(btn => {
-        const t = normalize(btn.textContent || '');
+    const denyBtn = containerItems.find(el => {
+        const t = normalize(el.textContent || '');
         return DENY_PATTERNS.some(p => t.includes(p));
     }) || null;
 
     if (!denyBtn) return null;
 
-    const alwaysAllowBtn = containerButtons.find(btn => {
-        const t = normalize(btn.textContent || '');
+    const alwaysAllowBtn = containerItems.find(el => {
+        const t = normalize(el.textContent || '');
         return ALWAYS_ALLOW_PATTERNS.some(p => t.includes(p));
     }) || null;
 
@@ -95,25 +122,33 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
     const alwaysAllowText = alwaysAllowBtn ? (alwaysAllowBtn.textContent || '').trim() : '';
     const denyText = (denyBtn.textContent || '').trim();
 
-    // Description extraction (multiple fallbacks)
+    // --- Description extraction (multiple fallbacks) ---
     let description = '';
 
-    // 1. p or .description inside dialog/modal
-    const dialog = container;
-    if (dialog) {
-        const descEl = dialog.querySelector('p, .description, [data-testid="description"]');
-        if (descEl) {
-            description = (descEl.textContent || '').trim();
+    // 1. Dedicated title/description elements in the dialog
+    const titleEl = container.querySelector(
+        'h1, h2, h3, [role="heading"], [class*="title"], [class*="heading"], [class*="label"]'
+    );
+    const bodyEl = container.querySelector(
+        'p, .description, [data-testid="description"], [class*="body"], [class*="detail"], [class*="subtitle"], code'
+    );
+    if (titleEl) {
+        description = (titleEl.textContent || '').trim();
+        // Append a detail line if present (e.g. the URL / domain)
+        if (bodyEl) {
+            const detail = (bodyEl.textContent || '').trim();
+            if (detail && detail !== description) {
+                description += ' — ' + detail;
+            }
         }
     }
 
-    // 2. Parent element text (excluding button text)
+    // 2. Parent element text excluding interactive children
     if (!description) {
         const parent = approveBtn.parentElement?.parentElement || approveBtn.parentElement;
         if (parent) {
             const clone = parent.cloneNode(true);
-            const buttons = clone.querySelectorAll('button');
-            buttons.forEach(b => b.remove());
+            clone.querySelectorAll(CLICKABLE_SELECTORS.join(',')).forEach(b => b.remove());
             const parentText = (clone.textContent || '').trim();
             if (parentText.length > 5 && parentText.length < 500) {
                 description = parentText;
@@ -121,10 +156,12 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
         }
     }
 
-    // 3. aria-label fallback
+    // 3. aria-label on container or approve button
     if (!description) {
-        const ariaLabel = approveBtn.getAttribute('aria-label') || '';
-        if (ariaLabel) description = ariaLabel;
+        description =
+            container.getAttribute('aria-label') ||
+            container.getAttribute('aria-labelledby') && '' || // just reset
+            approveBtn.getAttribute('aria-label') || '';
     }
 
     return { approveText, alwaysAllowText, denyText, description };
@@ -134,8 +171,18 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
  * Press the toggle on the right side of Allow Once to expand the Always Allow dropdown.
  */
 const EXPAND_ALWAYS_ALLOW_MENU_SCRIPT = `(() => {
-    const ALLOW_ONCE_PATTERNS = ['allow once', 'allow one time', '今回のみ許可', '1回のみ許可', '一度許可'];
+    const ALLOW_ONCE_PATTERNS = [
+        'yes, allow this time',
+        'yes, allow once',
+        'allow once',
+        'allow one time',
+        '今回のみ許可',
+        '1回のみ許可',
+        '一度許可',
+    ];
     const ALWAYS_ALLOW_PATTERNS = [
+        'yes, and always allow',
+        'yes, always allow',
         'allow this conversation',
         'allow this chat',
         'always allow',
@@ -143,23 +190,35 @@ const EXPAND_ALWAYS_ALLOW_MENU_SCRIPT = `(() => {
         'この会話を許可',
     ];
 
-    const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
-    const visibleButtons = Array.from(document.querySelectorAll('button'))
-        .filter(btn => btn.offsetParent !== null);
+    const CLICKABLE_SELECTORS = [
+        'button',
+        '[role="option"]',
+        '[role="listitem"]',
+        '[role="menuitem"]',
+        'li[tabindex]',
+        '[class*="option"][tabindex]',
+        '[class*="item"][tabindex]',
+    ];
 
-    const directAlways = visibleButtons.find(btn => {
-        const t = normalize(btn.textContent || '');
+    const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+    const visibleItems = Array.from(document.querySelectorAll(CLICKABLE_SELECTORS.join(',')))
+        .filter(el => el.offsetParent !== null);
+
+    const directAlways = visibleItems.find(el => {
+        const t = normalize(el.textContent || '');
         return ALWAYS_ALLOW_PATTERNS.some(p => t.includes(p));
     });
     if (directAlways) return { ok: true, reason: 'already-visible' };
 
-    const allowOnceBtn = visibleButtons.find(btn => {
-        const t = normalize(btn.textContent || '');
+    const allowOnceBtn = visibleItems.find(el => {
+        const t = normalize(el.textContent || '');
         return ALLOW_ONCE_PATTERNS.some(p => t.includes(p));
     });
     if (!allowOnceBtn) return { ok: false, error: 'allow-once button not found' };
 
-    const container = allowOnceBtn.closest('[role="dialog"], .modal, .dialog, .approval-container, .permission-dialog')
+    const container = allowOnceBtn.closest(
+        '[role="dialog"], .modal, .dialog, .approval-container, .permission-dialog, [class*="permission"], [class*="approval"]'
+    )
         || allowOnceBtn.parentElement?.parentElement
         || allowOnceBtn.parentElement
         || document.body;
@@ -214,18 +273,36 @@ export function buildClickScript(buttonText: string): string {
         const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
         const text = ${safeText};
         const wanted = normalize(text);
-        const allButtons = Array.from(document.querySelectorAll('button'));
-        const target = allButtons.find(btn => {
-            if (!btn.offsetParent) return false;
-            const buttonText = normalize(btn.textContent || '');
-            const ariaLabel = normalize(btn.getAttribute('aria-label') || '');
-            return buttonText === wanted ||
+        // Search buttons AND list/option items for the widest compatibility
+        const CLICKABLE_SELECTORS = [
+            'button',
+            '[role="option"]',
+            '[role="listitem"]',
+            '[role="menuitem"]',
+            'li[tabindex]',
+            '[class*="option"][tabindex]',
+            '[class*="item"][tabindex]',
+        ];
+        const allElements = Array.from(document.querySelectorAll(CLICKABLE_SELECTORS.join(',')));
+        const target = allElements.find(el => {
+            if (!el.offsetParent) return false;
+            const elText = normalize(el.textContent || '');
+            const ariaLabel = normalize(el.getAttribute('aria-label') || '');
+            return elText === wanted ||
                 ariaLabel === wanted ||
-                buttonText.includes(wanted) ||
+                elText.includes(wanted) ||
                 ariaLabel.includes(wanted);
         });
         if (!target) return { ok: false, error: 'Button not found: ' + text };
-        target.click();
+        // Dispatch full pointer event sequence for list items that may not respond to .click()
+        const rect = target.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+            target.dispatchEvent(new MouseEvent(type, {
+                bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy
+            }));
+        }
         return { ok: true };
     })()`;
 }
