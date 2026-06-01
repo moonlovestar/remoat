@@ -95,22 +95,66 @@ const buildDetectPlanningScript = (
     const ALLOW_PATTERNS = ['yes, allow', 'allow', 'permit', 'run', 'execute', '許可', '承認', '確認', '実行', '同意授權'];
     const DENY_PATTERNS = ["don't run", "don't allow", "don't", 'no (', 'no,', 'no.', 'no!', 'deny', 'reject', '拒否', 'decline', '却下', 'skip', 'cancel', 'not now', 'dismiss', 'close', 'abort', 'いいえ', 'キャンセル', '拒絕授權', 'other (write your answer)'];
 
-    // Check a DOM scope for allow/deny buttons; returns approval info or null
+    // Check a DOM scope for allow/deny buttons; returns approval info or null.
+    // Handles both classic button-based dialogs AND radio-list permission prompts
+    // (Antigravity URL/file permission dialogs that use plain div/span option rows + Submit).
     function detectApproval(scope) {
-        const btns = Array.from(scope.querySelectorAll('button, [role="button"]'))
-            .filter(b => b.offsetParent !== null || (b.getBoundingClientRect().width > 0 && b.getBoundingClientRect().height > 0));
+        const isVis = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
         const norm = (t) => (t || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+
+        // --- Path A: classic button/role=button scan ---
+        const CLICKABLE = 'button, [role="button"], [role="option"], [role="listitem"], [role="menuitem"], li[tabindex], [class*="option"][tabindex], [class*="item"][tabindex]';
+        const btns = Array.from(scope.querySelectorAll(CLICKABLE)).filter(isVis);
         let approveBtn = btns.find(b => ALLOW_ONCE_PATTERNS.some(p => norm(b.textContent).includes(p))) || null;
         if (!approveBtn) approveBtn = btns.find(b => { const t = norm(b.textContent); return !ALWAYS_ALLOW_PATTERNS.some(p => t.includes(p)) && ALLOW_PATTERNS.some(p => t.includes(p)); }) || null;
-        if (!approveBtn) return null;
-        const denyBtn = btns.find(b => DENY_PATTERNS.some(p => norm(b.textContent).includes(p))) || null;
-        const alwaysAllowBtn = btns.find(b => ALWAYS_ALLOW_PATTERNS.some(p => norm(b.textContent).includes(p))) || null;
-        const titleEl = scope.querySelector('h1, h2, h3, [role="heading"], [class*="title"], [class*="heading"]');
-        const bodyEl = scope.querySelector('p, .description, [class*="body"], [class*="detail"], code');
-        let description = titleEl ? (titleEl.textContent || '').trim() : '';
-        if (description && bodyEl) { const d = (bodyEl.textContent || '').trim(); if (d && d !== description) description += ' — ' + d; }
-        if (!description) { const clone = approveBtn.parentElement?.cloneNode(true); if (clone) { clone.querySelectorAll('button,[role="button"]').forEach(x => x.remove()); const t = (clone.textContent || '').trim(); if (t.length > 5 && t.length < 500) description = t; } }
-        return { isApprovalRequest: true, approveText: (approveBtn.textContent || '').trim(), alwaysAllowText: alwaysAllowBtn ? (alwaysAllowBtn.textContent || '').trim() : '', denyText: denyBtn ? (denyBtn.textContent || '').trim() : '', description };
+        if (approveBtn) {
+            const denyBtn = btns.find(b => DENY_PATTERNS.some(p => norm(b.textContent).includes(p))) || null;
+            const alwaysAllowBtn = btns.find(b => ALWAYS_ALLOW_PATTERNS.some(p => norm(b.textContent).includes(p))) || null;
+            const titleEl = scope.querySelector('h1, h2, h3, [role="heading"], [class*="title"], [class*="heading"]');
+            const bodyEl = scope.querySelector('p, .description, [class*="body"], [class*="detail"], code');
+            let description = titleEl ? (titleEl.textContent || '').trim() : '';
+            if (description && bodyEl) { const d = (bodyEl.textContent || '').trim(); if (d && d !== description) description += ' — ' + d; }
+            if (!description) { const clone = approveBtn.parentElement?.cloneNode(true); if (clone) { clone.querySelectorAll(CLICKABLE).forEach(x => x.remove()); const t = (clone.textContent || '').trim(); if (t.length > 5 && t.length < 500) description = t; } }
+            // Check if this is a radio-list style (Submit button present in same container)
+            const submitBtn = btns.find(b => norm(b.textContent || b.getAttribute('aria-label') || '') === 'submit');
+            return { isApprovalRequest: true, approveText: (approveBtn.textContent || '').trim(), alwaysAllowText: alwaysAllowBtn ? (alwaysAllowBtn.textContent || '').trim() : '', denyText: denyBtn ? (denyBtn.textContent || '').trim() : '', description, submitRequired: !!submitBtn };
+        }
+
+        // --- Path B: radio-list scan — plain div/span option rows + Submit button ---
+        // Antigravity's URL/file permission prompt renders options as non-interactive elements.
+        // The option rows are NOT buttons, so the standard scan above misses them entirely.
+        const allEls = Array.from(scope.querySelectorAll('*')).filter(el => {
+            if (!isVis(el)) return false;
+            if (el.children.length > 8) return false;
+            const t = norm(el.textContent || '');
+            return t.length > 0 && t.length <= 180 && ALLOW_ONCE_PATTERNS.some(p => t.includes(p));
+        }).sort((a, b) => {
+            const ta = norm(a.textContent || ''), tb = norm(b.textContent || '');
+            const aEx = ALLOW_ONCE_PATTERNS.some(p => ta === p), bEx = ALLOW_ONCE_PATTERNS.some(p => tb === p);
+            if (aEx !== bEx) return aEx ? -1 : 1;
+            if (a.children.length !== b.children.length) return a.children.length - b.children.length;
+            return ta.length - tb.length;
+        });
+        for (const approveEl of allEls) {
+            // Walk up ancestors looking for a Submit button
+            let anc = approveEl.parentElement;
+            for (let i = 0; i < 12 && anc && anc !== document.body; i++) {
+                const submitBtn = Array.from(anc.querySelectorAll('button, [role="button"]'))
+                    .filter(isVis)
+                    .find(b => norm(b.textContent || b.getAttribute('aria-label') || '') === 'submit');
+                if (!submitBtn) { anc = anc.parentElement; continue; }
+                // Found a Submit button — this is a radio-list permission dialog
+                const elems = Array.from(anc.querySelectorAll('*')).filter(el => isVis(el) && el.children.length <= 8 && (el.textContent || '').length <= 180);
+                const denyEl = elems.find(el => DENY_PATTERNS.some(p => norm(el.textContent || '').includes(p))) || null;
+                const alwaysEl = elems.find(el => ALWAYS_ALLOW_PATTERNS.some(p => norm(el.textContent || '').includes(p))) || null;
+                const titleEl = anc.querySelector('h1,h2,h3,[role="heading"],[class*="title"],[class*="heading"],[class*="label"]');
+                const bodyEl = anc.querySelector('p,.description,[data-testid="description"],[class*="body"],[class*="detail"],[class*="subtitle"],code');
+                let description = titleEl ? (titleEl.textContent || '').trim() : '';
+                if (bodyEl) { const body = (bodyEl.textContent || '').trim(); if (body && body !== description) description = description ? description + ' — ' + body : body; }
+                return { isApprovalRequest: true, approveText: (approveEl.textContent || '').trim(), alwaysAllowText: alwaysEl ? (alwaysEl.textContent || '').trim() : '', denyText: denyEl ? (denyEl.textContent || '').trim() : '', description, submitRequired: true };
+            }
+        }
+        return null;
     }
 
     const lastClickedText = ${lastClickedText ? JSON.stringify(lastClickedText) : 'null'};

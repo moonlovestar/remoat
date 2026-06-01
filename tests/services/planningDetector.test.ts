@@ -580,4 +580,70 @@ describe('PlanningDetector - planning button detection and remote execution', ()
 
         expect(onResolved).not.toHaveBeenCalled();
     });
+
+    // ──────────────────────────────────────────────────────
+    // Radio-list permission dialog (Antigravity URL/file permission prompt)
+    // ──────────────────────────────────────────────────────
+
+    it('routes radio-list permission dialog to onApprovalRequest with submitRequired=true', async () => {
+        const onApprovalRequest = jest.fn();
+        const onPlanningRequired = jest.fn();
+
+        // Simulate: baseline → radio-list approval payload (submitRequired: true)
+        const approvalPayload = {
+            isApprovalRequest: true,
+            approveText: 'Yes, allow this time',
+            alwaysAllowText: 'Yes, and always allow',
+            denyText: 'No (tell the agent what to do instead)',
+            description: 'Allow reading this URL? — localhost',
+            submitRequired: true,
+        };
+
+        mockCdpService.call
+            .mockResolvedValueOnce(BASELINE_RESP)
+            .mockResolvedValueOnce({ result: { value: approvalPayload } });
+
+        detector = new PlanningDetector({
+            cdpService: mockCdpService,
+            pollIntervalMs: 500,
+            onPlanningRequired,
+            onApprovalRequest,
+        });
+        detector.start();
+
+        await jest.advanceTimersByTimeAsync(500);
+
+        expect(onApprovalRequest).toHaveBeenCalledTimes(1);
+        const info = onApprovalRequest.mock.calls[0][0];
+        expect(info.approveText).toBe('Yes, allow this time');
+        expect(info.alwaysAllowText).toBe('Yes, and always allow');
+        expect(info.denyText).toBe('No (tell the agent what to do instead)');
+        expect(info.description).toContain('Allow reading this URL?');
+        expect(info.submitRequired).toBe(true);
+        // Must NOT fire planning callback for a permission dialog
+        expect(onPlanningRequired).not.toHaveBeenCalled();
+    });
+
+    it('does not fire onApprovalRequest for normal planning dialogs (no submitRequired)', async () => {
+        const onApprovalRequest = jest.fn();
+        const onPlanningRequired = jest.fn();
+        const mockInfo = makePlanningInfo();
+
+        mockCdpService.call
+            .mockResolvedValueOnce(BASELINE_RESP)
+            .mockResolvedValueOnce({ result: { value: mockInfo } });
+
+        detector = new PlanningDetector({
+            cdpService: mockCdpService,
+            pollIntervalMs: 500,
+            onPlanningRequired,
+            onApprovalRequest,
+        });
+        detector.start();
+
+        await jest.advanceTimersByTimeAsync(500);
+
+        expect(onPlanningRequired).toHaveBeenCalledTimes(1);
+        expect(onApprovalRequest).not.toHaveBeenCalled();
+    });
 });
