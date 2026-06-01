@@ -41,7 +41,7 @@ function createMockCdpService() {
 
 /**
  * Helper to build a CDP result for the COMBINED_POLL script.
- * Returns { isGenerating, quotaError, responseText, processLogs, planningActive }.
+ * Returns { isGenerating, quotaError, responseText, processLogs, planningActive, approvalActive }.
  */
 function combinedResult(opts: {
     isGenerating?: boolean;
@@ -49,6 +49,7 @@ function combinedResult(opts: {
     responseText?: string | null;
     processLogs?: string[];
     planningActive?: boolean;
+    approvalActive?: boolean;
 } = {}) {
     return {
         result: {
@@ -58,6 +59,7 @@ function combinedResult(opts: {
                 responseText: opts.responseText ?? null,
                 processLogs: opts.processLogs ?? [],
                 planningActive: opts.planningActive ?? false,
+                approvalActive: opts.approvalActive ?? false,
             },
         },
     };
@@ -532,6 +534,82 @@ describe('Lean ResponseMonitor (new API)', () => {
         await jest.advanceTimersByTimeAsync(2000);
 
         expect(cdpService.call.mock.calls.length - callsBefore).toBe(1);
+
+        await monitor.stop();
+    });
+
+    // ---------------------------------------------------------------
+    // Regression: approval/permission dialog defers completion
+    // When Antigravity shows a URL/file permission dialog (radio-list + Submit),
+    // the stop button is already gone but onComplete must NOT fire until the
+    // dialog is dismissed. Without this fix Telegram receives the previous
+    // (stale) search-result response instead of the permission prompt.
+    // ---------------------------------------------------------------
+    it('defers completion while approval/permission dialog is active', async () => {
+        const onComplete = jest.fn();
+        const monitor = new ResponseMonitor({
+            cdpService,
+            pollIntervalMs: 500,
+            stopGoneConfirmCount: 1,
+            onComplete,
+        } as any);
+
+        // Baseline setup
+        cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
+            .mockResolvedValueOnce(cdpResult(null))
+            .mockResolvedValueOnce(cdpResult(null));
+        await monitor.start();
+
+        // Poll 1: generation running
+        cdpService.call.mockResolvedValueOnce(combinedResult({ isGenerating: true, responseText: 'search results here' }));
+        await jest.advanceTimersByTimeAsync(500);
+        expect(onComplete).not.toHaveBeenCalled();
+
+        // Poll 2: stop button gone BUT approval dialog is active — must defer
+        cdpService.call.mockResolvedValueOnce(combinedResult({
+            isGenerating: false,
+            responseText: 'search results here',
+            approvalActive: true,
+        }));
+        await jest.advanceTimersByTimeAsync(500);
+        expect(onComplete).not.toHaveBeenCalled(); // <-- must NOT fire
+
+        // Poll 3: approval dialog dismissed — now completion should fire
+        cdpService.call.mockResolvedValueOnce(combinedResult({
+            isGenerating: false,
+            responseText: 'search results here',
+            approvalActive: false,
+        }));
+        await jest.advanceTimersByTimeAsync(500);
+        expect(onComplete).toHaveBeenCalledTimes(1);
+
+        await monitor.stop();
+    });
+
+    it('fires completion immediately when no approval dialog is present', async () => {
+        const onComplete = jest.fn();
+        const monitor = new ResponseMonitor({
+            cdpService,
+            pollIntervalMs: 500,
+            stopGoneConfirmCount: 1,
+            onComplete,
+        } as any);
+
+        cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
+            .mockResolvedValueOnce(cdpResult(null))
+            .mockResolvedValueOnce(cdpResult(null));
+        await monitor.start();
+
+        // Poll 1: generating
+        cdpService.call.mockResolvedValueOnce(combinedResult({ isGenerating: true, responseText: 'hello' }));
+        await jest.advanceTimersByTimeAsync(500);
+
+        // Poll 2: stop gone, no approval dialog — should complete
+        cdpService.call.mockResolvedValueOnce(combinedResult({ isGenerating: false, responseText: 'hello' }));
+        await jest.advanceTimersByTimeAsync(500);
+        expect(onComplete).toHaveBeenCalledTimes(1);
 
         await monitor.stop();
     });

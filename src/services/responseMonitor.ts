@@ -531,7 +531,36 @@ export const RESPONSE_SELECTORS = {
             }
         }
 
-        return { isGenerating, quotaError, planningActive, responseText, processLogs };
+        // --- Approval/permission dialog active ---
+        // Detects Antigravity's URL/file permission prompts that render as a radio-list
+        // with a Submit button (not a .notify-user-container). When this dialog is visible
+        // the stop button is already gone, so without this check ResponseMonitor fires
+        // onComplete immediately and Telegram receives the previous (stale) response.
+        let approvalActive = false;
+        const ALLOW_ONCE_NORM = ['yes, allow this time', 'yes, allow once', 'allow this time', 'allow once', 'allow one time', '許可', '一度許可'];
+        const normApproval = (t) => (t || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        const isVisibleEl = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
+        const allEls = Array.from(document.querySelectorAll('*'));
+        const approveCandidate = allEls.find(el => {
+            if (!isVisibleEl(el)) return false;
+            if (el.children.length > 8) return false;
+            const t = normApproval(el.textContent || '');
+            if (t.length === 0 || t.length > 180) return false;
+            return ALLOW_ONCE_NORM.some(p => t.includes(p));
+        });
+        if (approveCandidate) {
+            // Walk up to find a Submit button in the same container
+            let anc = approveCandidate.parentElement;
+            for (let i = 0; i < 12 && anc && anc !== document.body; i++) {
+                const submitBtn = Array.from(anc.querySelectorAll('button, [role="button"]'))
+                    .filter(isVisibleEl)
+                    .find(b => normApproval(b.textContent || b.getAttribute('aria-label') || '') === 'submit');
+                if (submitBtn) { approvalActive = true; break; }
+                anc = anc.parentElement;
+            }
+        }
+
+        return { isGenerating, quotaError, planningActive, approvalActive, responseText, processLogs };
     })()`,
     /** Quota error detection — text-based h3 span match first, class-based fallback second */
     QUOTA_ERROR: `(() => {
@@ -1009,6 +1038,7 @@ export class ResponseMonitor {
             let isGenerating: boolean;
             let quotaDetected: boolean;
             let planningActive: boolean;
+            let approvalActive: boolean;
             let currentText: string | null = null;
             let structuredHandledLogs = false;
 
@@ -1023,6 +1053,7 @@ export class ResponseMonitor {
                 isGenerating = !!combined.isGenerating;
                 quotaDetected = !!combined.quotaError;
                 planningActive = !!combined.planningActive;
+                approvalActive = !!combined.approvalActive;
 
                 // Try structured extraction first
                 if (structuredResult) {
@@ -1082,6 +1113,7 @@ export class ResponseMonitor {
                 isGenerating = !!combined.isGenerating;
                 quotaDetected = !!combined.quotaError;
                 planningActive = !!combined.planningActive;
+                approvalActive = !!combined.approvalActive;
                 currentText = typeof combined.responseText === 'string' ? combined.responseText.trim() || null : null;
                 this.lastExtractionSource = 'legacy';
 
@@ -1146,8 +1178,13 @@ export class ResponseMonitor {
 
             // Completion: stop button gone N consecutive times
             if (!isGenerating && this.generationStarted) {
+                // Approval/permission dialog active — defer completion so the bot can
+                // send the permission prompt to Telegram instead of the stale response.
+                if (approvalActive) {
+                    this.stopGoneCount = 0;
+                    logger.info('[ResponseMonitor] Approval/permission dialog active — deferring completion');
                 // Planning check already done in combined poll script
-                if (planningActive) {
+                } else if (planningActive) {
                     this.stopGoneCount = 0;
                     logger.info('[ResponseMonitor] Planning dialog active — deferring completion');
                     // One-shot diagnostic: dump what triggered planningActive
