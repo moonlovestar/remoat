@@ -61,6 +61,8 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
     ];
 
     const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+    // offsetParent is null for position:fixed elements in Chrome — use getBoundingClientRect as fallback
+    const isVisible = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
 
     // Collect all visible interactive elements — buttons AND list/option items
     const CLICKABLE_SELECTORS = [
@@ -74,7 +76,7 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
     ];
     const allInteractive = Array.from(
         document.querySelectorAll(CLICKABLE_SELECTORS.join(','))
-    ).filter(el => el.offsetParent !== null);
+    ).filter(isVisible);
 
     let approveBtn = allInteractive.find(el => {
         const t = normalize(el.textContent || '');
@@ -100,7 +102,7 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
         let el = approveBtn.parentElement;
         for (let i = 0; i < 8 && el && el !== document.body; i++) {
             const candidates = Array.from(el.querySelectorAll(CLICKABLE_SELECTORS.join(',')))
-                .filter(b => b.offsetParent !== null);
+                .filter(isVisible);
             if (candidates.some(b => DENY_PATTERNS.some(p => normalize(b.textContent || '').includes(p)))) {
                 container = el;
                 break;
@@ -112,7 +114,7 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
 
     const containerItems = Array.from(
         container.querySelectorAll(CLICKABLE_SELECTORS.join(','))
-    ).filter(el => el.offsetParent !== null);
+    ).filter(isVisible);
 
     const denyBtn = containerItems.find(el => {
         const t = normalize(el.textContent || '');
@@ -209,8 +211,9 @@ const EXPAND_ALWAYS_ALLOW_MENU_SCRIPT = `(() => {
     ];
 
     const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+    const isVisible = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
     const visibleItems = Array.from(document.querySelectorAll(CLICKABLE_SELECTORS.join(',')))
-        .filter(el => el.offsetParent !== null);
+        .filter(isVisible);
 
     const directAlways = visibleItems.find(el => {
         const t = normalize(el.textContent || '');
@@ -232,7 +235,7 @@ const EXPAND_ALWAYS_ALLOW_MENU_SCRIPT = `(() => {
         || document.body;
 
     const containerButtons = Array.from(container.querySelectorAll('button'))
-        .filter(btn => btn.offsetParent !== null);
+        .filter(isVisible);
 
     const toggleBtn = containerButtons.find(btn => {
         if (btn === allowOnceBtn) return false;
@@ -293,7 +296,7 @@ export function buildClickScript(buttonText: string): string {
         ];
         const allElements = Array.from(document.querySelectorAll(CLICKABLE_SELECTORS.join(',')));
         const target = allElements.find(el => {
-            if (!el.offsetParent) return false;
+            if (!el.offsetParent && el.getBoundingClientRect().width === 0) return false;
             const elText = normalize(el.textContent || '');
             const ariaLabel = normalize(el.getAttribute('aria-label') || '');
             return elText === wanted ||
@@ -333,6 +336,8 @@ export class ApprovalDetector {
     private lastDetectedKey: string | null = null;
     /** Full ApprovalInfo from the last detection (used for clicking) */
     private lastDetectedInfo: ApprovalInfo | null = null;
+    /** Execution context ID where buttons were last found (undefined = not yet discovered) */
+    private lastDetectedContextId: number | null | undefined = undefined;
 
     constructor(options: ApprovalDetectorOptions) {
         this.cdpService = options.cdpService;
@@ -349,6 +354,7 @@ export class ApprovalDetector {
         this.isRunning = true;
         this.lastDetectedKey = null;
         this.lastDetectedInfo = null;
+        this.lastDetectedContextId = undefined;
         this.schedulePoll();
     }
 
@@ -361,6 +367,7 @@ export class ApprovalDetector {
             clearTimeout(this.pollTimer);
             this.pollTimer = null;
         }
+        this.lastDetectedContextId = undefined;
     }
 
     /**
@@ -384,51 +391,86 @@ export class ApprovalDetector {
 
     /**
      * Single poll iteration:
-     *   1. Get approval button info from DOM (with contextId)
+     *   1. Scan all execution contexts for approval buttons
      *   2. Notify via callback only on new detection (prevent duplicates)
-     *   3. Reset lastDetectedKey / lastDetectedInfo when buttons disappear
+     *   3. Reset state when buttons disappear
      */
     private async poll(): Promise<void> {
         try {
-            const contextId = this.cdpService.getPrimaryContextId();
-            const callParams: Record<string, unknown> = {
-                expression: DETECT_APPROVAL_SCRIPT,
-                returnByValue: true,
-                awaitPromise: false,
-            };
-            if (contextId !== null) {
-                callParams.contextId = contextId;
-            }
-
-            const result = await this.cdpService.call('Runtime.evaluate', callParams);
-            const info: ApprovalInfo | null = result?.result?.value ?? null;
+            const detected = await this.detectApproval();
+            const info = detected?.info ?? null;
 
             if (info) {
-                // Duplicate prevention: use approveText + description combination as key
                 const key = `${info.approveText}::${info.description}`;
                 if (key !== this.lastDetectedKey) {
                     this.lastDetectedKey = key;
                     this.lastDetectedInfo = info;
+                    this.lastDetectedContextId = detected!.contextId;
                     Promise.resolve(this.onApprovalRequired(info)).catch((err) => {
                         logger.error('[ApprovalDetector] onApprovalRequired callback failed:', err);
                     });
                 }
             } else {
-                // Reset when buttons disappear (prepare for next approval detection)
                 const wasDetected = this.lastDetectedKey !== null;
                 this.lastDetectedKey = null;
                 this.lastDetectedInfo = null;
+                this.lastDetectedContextId = undefined;
                 if (wasDetected && this.onResolved) {
                     this.onResolved();
                 }
             }
         } catch (error) {
-            // Ignore CDP errors and continue monitoring
             const message = error instanceof Error ? error.message : String(error);
             if (message.includes('WebSocket is not connected') || message.includes('WebSocket disconnected')) {
                 return;
             }
             logger.error('[ApprovalDetector] Error during polling:', error);
+        }
+    }
+
+    /**
+     * Scan all CDP execution contexts for the permission dialog.
+     * Tries the cached context first (fast path), then falls back to a full scan.
+     */
+    private async detectApproval(): Promise<{ info: ApprovalInfo; contextId: number | null | undefined } | null> {
+        // Fast path: re-use the context where buttons were last found
+        if (this.lastDetectedContextId !== undefined) {
+            const info = await this.evaluateDetectScript(this.lastDetectedContextId);
+            if (info) return { info, contextId: this.lastDetectedContextId };
+        }
+
+        // Full scan: try every execution context reported by the CDP connection
+        const contexts = this.cdpService.getContexts();
+        for (const ctx of contexts) {
+            if (ctx.id === this.lastDetectedContextId) continue; // already tried above
+            const info = await this.evaluateDetectScript(ctx.id);
+            if (info) return { info, contextId: ctx.id };
+        }
+
+        // Final fallback: default context (no contextId param)
+        if (this.lastDetectedContextId !== null) {
+            const info = await this.evaluateDetectScript(null);
+            if (info) return { info, contextId: null };
+        }
+
+        return null;
+    }
+
+    /** Run DETECT_APPROVAL_SCRIPT in the given context; returns null on any error or miss. */
+    private async evaluateDetectScript(contextId: number | null | undefined): Promise<ApprovalInfo | null> {
+        try {
+            const callParams: Record<string, unknown> = {
+                expression: DETECT_APPROVAL_SCRIPT,
+                returnByValue: true,
+                awaitPromise: false,
+            };
+            if (contextId !== null && contextId !== undefined) {
+                callParams.contextId = contextId;
+            }
+            const result = await this.cdpService.call('Runtime.evaluate', callParams);
+            return result?.result?.value ?? null;
+        } catch {
+            return null;
         }
     }
 
@@ -500,16 +542,19 @@ export class ApprovalDetector {
     }
 
     /**
-     * Execute Runtime.evaluate with contextId and return result.value.
+     * Execute Runtime.evaluate and return result.value.
+     * Uses the context where buttons were last detected so clicks land in the right frame.
      */
     private async runEvaluateScript(expression: string): Promise<any> {
-        const contextId = this.cdpService.getPrimaryContextId();
+        const contextId = this.lastDetectedContextId !== undefined
+            ? this.lastDetectedContextId
+            : this.cdpService.getPrimaryContextId();
         const callParams: Record<string, unknown> = {
             expression,
             returnByValue: true,
             awaitPromise: false,
         };
-        if (contextId !== null) {
+        if (contextId !== null && contextId !== undefined) {
             callParams.contextId = contextId;
         }
         const result = await this.cdpService.call('Runtime.evaluate', callParams);
