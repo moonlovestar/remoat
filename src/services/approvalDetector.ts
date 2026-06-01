@@ -11,6 +11,8 @@ export interface ApprovalInfo {
     denyText: string;
     /** Action description (e.g. "write to file.ts") */
     description: string;
+    /** True when the UI requires selecting an option then clicking Submit (radio-list style) */
+    submitRequired?: boolean;
 }
 
 export interface ApprovalDetectorOptions {
@@ -29,7 +31,7 @@ export interface ApprovalDetectorOptions {
  *
  * Detects allow/deny button pairs and extracts descriptions with fallbacks.
  */
-const DETECT_APPROVAL_SCRIPT = `(() => {
+export const DETECT_APPROVAL_SCRIPT = `(() => {
     const ALLOW_ONCE_PATTERNS = [
         'yes, allow this time', 'yes, allow once', 'allow this time',
         'allow once', 'allow one time',
@@ -102,6 +104,62 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
         };
     }
 
+    function findRadioListApproval() {
+        // Antigravity's URL permission prompt can render as a selected-option list:
+        //   "Yes, allow this time" / "Yes, and always allow" / "No (...)" + Submit
+        // The option rows may be plain div/span elements, not buttons or role=option,
+        // so the normal clickable-selector scan misses them.
+        const candidateEls = Array.from(document.querySelectorAll('*')).filter(el => {
+            if (!isVisible(el)) return false;
+            if (el.children.length > 8) return false;
+            const t = normalize(el.textContent || '');
+            if (t.length === 0 || t.length > 180) return false;
+            return ALLOW_ONCE_PATTERNS.some(p => t.includes(p));
+        }).sort((a, b) => {
+            const ta = normalize(a.textContent || '');
+            const tb = normalize(b.textContent || '');
+            const aExact = ALLOW_ONCE_PATTERNS.some(p => ta === p);
+            const bExact = ALLOW_ONCE_PATTERNS.some(p => tb === p);
+            if (aExact !== bExact) return aExact ? -1 : 1;
+            if (a.children.length !== b.children.length) return a.children.length - b.children.length;
+            return ta.length - tb.length;
+        });
+
+        for (const approveEl of candidateEls) {
+            let anc = approveEl.parentElement;
+            for (let i = 0; i < 12 && anc && anc !== document.body; i++) {
+                const submitBtn = Array.from(anc.querySelectorAll('button, [role="button"]'))
+                    .filter(isVisible)
+                    .find(b => normalize(b.textContent || b.getAttribute('aria-label') || '') === 'submit');
+                if (!submitBtn) {
+                    anc = anc.parentElement;
+                    continue;
+                }
+
+                const elems = Array.from(anc.querySelectorAll('*'))
+                    .filter(el => isVisible(el) && el.children.length <= 8 && (el.textContent || '').length <= 180);
+                const denyEl = elems.find(el => DENY_PATTERNS.some(p => normalize(el.textContent || '').includes(p))) || null;
+                const alwaysEl = elems.find(el => ALWAYS_ALLOW_PATTERNS.some(p => normalize(el.textContent || '').includes(p))) || null;
+                const titleEl = anc.querySelector('h1,h2,h3,[role="heading"],[class*="title"],[class*="heading"],[class*="label"]');
+                const bodyEl = anc.querySelector('p,.description,[data-testid="description"],[class*="body"],[class*="detail"],[class*="subtitle"],code');
+                let description = titleEl ? (titleEl.textContent || '').trim() : '';
+                if (bodyEl) {
+                    const body = (bodyEl.textContent || '').trim();
+                    if (body && body !== description) description = description ? description + ' — ' + body : body;
+                }
+
+                return {
+                    approveText: (approveEl.textContent || '').trim(),
+                    alwaysAllowText: alwaysEl ? (alwaysEl.textContent || '').trim() : '',
+                    denyText: denyEl ? (denyEl.textContent || '').trim() : '',
+                    description,
+                    submitRequired: true,
+                };
+            }
+        }
+        return null;
+    }
+
     // ---- TIER 1: .notify-user-container (Antigravity's inline agent panel prompts) ----
     const notifyContainers = Array.from(document.querySelectorAll('.notify-user-container')).filter(isVisible);
     for (let i = notifyContainers.length - 1; i >= 0; i--) {
@@ -118,7 +176,11 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
         if (found) return makeResult(dialogContainers[i], found);
     }
 
-    // ---- TIER 3: global scan — REQUIRES deny button to avoid VS Code false positives ----
+    // ---- TIER 3: radio-list option UI with a Submit button ----
+    const radioListApproval = findRadioListApproval();
+    if (radioListApproval) return radioListApproval;
+
+    // ---- TIER 4: global scan — REQUIRES deny button to avoid VS Code false positives ----
     const allInteractive = Array.from(document.querySelectorAll(CLICKABLE_SELECTORS.join(','))).filter(isVisible);
     let approveBtn = allInteractive.find(el => ALLOW_ONCE_PATTERNS.some(p => normalize(el.textContent || '').includes(p))) || null;
     if (!approveBtn) {
@@ -147,6 +209,7 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
     if (!denyBtn) return null;
     const alwaysAllowBtn = containerItems.find(el => ALWAYS_ALLOW_PATTERNS.some(p => normalize(el.textContent || '').includes(p))) || null;
     return makeResult(container, { approveBtn, denyBtn, alwaysAllowBtn });
+
 })()`;
 
 /**
@@ -258,28 +321,40 @@ export function buildClickScript(buttonText: string): string {
         const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
         const text = ${safeText};
         const wanted = normalize(text);
-        // Search buttons AND list/option items for the widest compatibility
+        const isVisible = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
+        // Phase 1: standard interactive selectors
         const CLICKABLE_SELECTORS = [
             'button', '[role="button"]',
-            '[role="option"]',
-            '[role="listitem"]',
-            '[role="menuitem"]',
-            'li[tabindex]',
-            '[class*="option"][tabindex]',
-            '[class*="item"][tabindex]',
+            '[role="option"]', '[role="listitem"]', '[role="menuitem"]',
+            'li[tabindex]', '[class*="option"][tabindex]', '[class*="item"][tabindex]',
         ];
-        const allElements = Array.from(document.querySelectorAll(CLICKABLE_SELECTORS.join(',')));
-        const target = allElements.find(el => {
-            if (!el.offsetParent && el.getBoundingClientRect().width === 0) return false;
-            const elText = normalize(el.textContent || '');
-            const ariaLabel = normalize(el.getAttribute('aria-label') || '');
-            return elText === wanted ||
-                ariaLabel === wanted ||
-                elText.includes(wanted) ||
-                ariaLabel.includes(wanted);
-        });
-        if (!target) return { ok: false, error: 'Button not found: ' + text };
-        // Dispatch full pointer event sequence for list items that may not respond to .click()
+        let target = Array.from(document.querySelectorAll(CLICKABLE_SELECTORS.join(','))).find(el => {
+            if (!isVisible(el)) return false;
+            const t = normalize(el.textContent || '');
+            const a = normalize(el.getAttribute('aria-label') || '');
+            return t === wanted || a === wanted || t.includes(wanted) || a.includes(wanted);
+        }) || null;
+        // Phase 2: fallback — search ALL visible leaf-ish elements (handles option-list divs/spans).
+        // Prefer exact, leaf-like matches so we do not click the whole permission card.
+        if (!target) {
+            const candidates = Array.from(document.querySelectorAll('*')).filter(el => {
+                if (!isVisible(el)) return false;
+                if (el.children.length > 8) return false;
+                const t = normalize(el.textContent || '');
+                if (t.length > 200) return false;
+                return t === wanted || t.includes(wanted);
+            }).sort((a, b) => {
+                const ta = normalize(a.textContent || '');
+                const tb = normalize(b.textContent || '');
+                const aExact = ta === wanted;
+                const bExact = tb === wanted;
+                if (aExact !== bExact) return aExact ? -1 : 1;
+                if (a.children.length !== b.children.length) return a.children.length - b.children.length;
+                return ta.length - tb.length;
+            });
+            target = candidates[0] || null;
+        }
+        if (!target) return { ok: false, error: 'Element not found: ' + text };
         const rect = target.getBoundingClientRect();
         const cx = rect.left + rect.width / 2;
         const cy = rect.top + rect.height / 2;
@@ -464,7 +539,9 @@ export class ApprovalDetector {
      */
     async approveButton(buttonText?: string): Promise<boolean> {
         const text = buttonText ?? this.lastDetectedInfo?.approveText ?? 'Allow';
-        return this.clickButton(text);
+        const clicked = await this.clickButton(text);
+        if (clicked) await this.submitIfRequired();
+        return clicked;
     }
 
     /**
@@ -474,6 +551,7 @@ export class ApprovalDetector {
     async alwaysAllowButton(): Promise<boolean> {
         const directCandidates = [
             this.lastDetectedInfo?.alwaysAllowText,
+            'Yes, and always allow',
             'Allow This Conversation',
             'Allow This Chat',
             'この会話を許可',
@@ -482,7 +560,10 @@ export class ApprovalDetector {
         ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
 
         for (const candidate of directCandidates) {
-            if (await this.clickButton(candidate)) return true;
+            if (await this.clickButton(candidate)) {
+                await this.submitIfRequired();
+                return true;
+            }
         }
 
         const expanded = await this.runEvaluateScript(EXPAND_ALWAYS_ALLOW_MENU_SCRIPT);
@@ -492,7 +573,10 @@ export class ApprovalDetector {
 
         for (let i = 0; i < 5; i++) {
             for (const candidate of directCandidates) {
-                if (await this.clickButton(candidate)) return true;
+                if (await this.clickButton(candidate)) {
+                    await this.submitIfRequired();
+                    return true;
+                }
             }
             await new Promise((resolve) => setTimeout(resolve, 120));
         }
@@ -507,7 +591,9 @@ export class ApprovalDetector {
      */
     async denyButton(buttonText?: string): Promise<boolean> {
         const text = buttonText ?? this.lastDetectedInfo?.denyText ?? 'Deny';
-        return this.clickButton(text);
+        const clicked = await this.clickButton(text);
+        if (clicked) await this.submitIfRequired();
+        return clicked;
     }
 
     /**
@@ -542,6 +628,22 @@ export class ApprovalDetector {
         }
         const result = await this.cdpService.call('Runtime.evaluate', callParams);
         return result?.result?.value;
+    }
+
+    /** Click Submit after selecting an option in radio-list permission prompts. */
+    private async submitIfRequired(): Promise<boolean> {
+        if (!this.lastDetectedInfo?.submitRequired) return true;
+        try {
+            const result = await this.runEvaluateScript(buildClickScript('Submit'));
+            if (result?.ok !== true) {
+                logger.warn(`[ApprovalDetector] Submit click failed after selecting permission option: ${JSON.stringify(result)}`);
+                return false;
+            }
+            return true;
+        } catch (error) {
+            logger.error('[ApprovalDetector] Error while clicking Submit:', error);
+            return false;
+        }
     }
 
     /** Returns whether monitoring is currently active */

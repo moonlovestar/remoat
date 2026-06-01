@@ -10,7 +10,7 @@
  *   - Verify that scripts are executed with a specified contextId
  */
 
-import { ApprovalDetector, ApprovalDetectorOptions, ApprovalInfo } from '../../src/services/approvalDetector';
+import { ApprovalDetector, ApprovalInfo, buildClickScript, DETECT_APPROVAL_SCRIPT } from '../../src/services/approvalDetector';
 import { CdpService } from '../../src/services/cdpService';
 
 // Mock CdpService
@@ -25,6 +25,7 @@ describe('ApprovalDetector - approval button detection and remote execution', ()
         jest.useFakeTimers();
         mockCdpService = new MockedCdpService() as jest.Mocked<CdpService>;
         mockCdpService.getPrimaryContextId = jest.fn().mockReturnValue(42);
+        mockCdpService.getContexts = jest.fn().mockReturnValue([{ id: 42 }] as any);
         jest.clearAllMocks();
     });
 
@@ -43,6 +44,90 @@ describe('ApprovalDetector - approval button detection and remote execution', ()
             description: 'ファイルへの書き込みを許可しますか？',
             ...overrides,
         };
+    }
+
+    function runScriptInMockDom(script: string): { result: any; events: string[] } {
+        const events: string[] = [];
+        const evaluate = new Function(`
+            const events = this.events;
+            const makeElement = (tagName, textContent = '', children = []) => {
+                const el = {
+                    tagName: tagName.toUpperCase(),
+                    textContent,
+                    children,
+                    parentElement: null,
+                    offsetParent: {},
+                    className: '',
+                    attributes: {},
+                    listeners: {},
+                    getBoundingClientRect: () => ({ width: 100, height: 20, left: 0, top: 0, right: 100, bottom: 20 }),
+                    getAttribute(name) { return this.attributes[name] || ''; },
+                    closest() { return dialog; },
+                    addEventListener(type, handler) { this.listeners[type] = handler; },
+                    dispatchEvent(event) {
+                        events.push(this.textContent + ':' + event.type);
+                        if (event.type === 'click' && this.listeners.click) this.listeners.click(event);
+                        return true;
+                    },
+                    click() { this.dispatchEvent(new MouseEvent('click', {})); },
+                    cloneNode() { return makeElement(this.tagName, this.textContent, []); },
+                    remove() { this.removed = true; },
+                    querySelectorAll(selector) { return queryWithin(this, selector); },
+                    querySelector(selector) { return queryWithin(this, selector)[0] || null; },
+                };
+                children.forEach(child => { child.parentElement = el; });
+                return el;
+            };
+            const heading = makeElement('h2', 'Allow reading this URL?');
+            const body = makeElement('p', 'To trigger the URL permission popup for debugging purposes.');
+            const code = makeElement('code', 'localhost');
+            const allow = makeElement('div', 'Yes, allow this time');
+            const always = makeElement('div', 'Yes, and always allow');
+            const deny = makeElement('div', 'No (tell the agent what to do instead)');
+            const skip = makeElement('button', 'Skip');
+            const submit = makeElement('button', 'Submit');
+            const dialog = makeElement('div', '', [heading, body, code, allow, always, deny, skip, submit]);
+            dialog.attributes.role = 'dialog';
+            dialog.className = 'permission-dialog';
+            const all = [dialog, heading, body, code, allow, always, deny, skip, submit];
+            const document = {
+                body: makeElement('body', '', [dialog]),
+                querySelectorAll: (selector) => queryWithin(null, selector),
+                querySelector: (selector) => queryWithin(null, selector)[0] || null,
+            };
+            function matches(el, selector) {
+                selector = selector.trim();
+                if (selector === '*') return true;
+                if (selector === 'button') return el.tagName === 'BUTTON';
+                if (selector === 'h1' || selector === 'h2' || selector === 'h3' || selector === 'p' || selector === 'code') return el.tagName === selector.toUpperCase();
+                if (selector === '[role="dialog"]') return el.attributes.role === 'dialog';
+                if (selector === '[role="button"]') return el.attributes.role === 'button';
+                if (selector === '[role="option"]') return el.attributes.role === 'option';
+                if (selector === '[role="listitem"]') return el.attributes.role === 'listitem';
+                if (selector === '[role="menuitem"]') return el.attributes.role === 'menuitem';
+                if (selector === '[role="heading"]') return el.attributes.role === 'heading';
+                if (selector === '.permission-dialog') return el.className.includes('permission-dialog');
+                if (selector === '.description') return el.className.includes('description');
+                if (selector.startsWith('[class*="')) return el.className.includes(selector.slice(9, -2));
+                if (selector.includes('[tabindex]')) return false;
+                if (selector.startsWith('[data-testid=')) return false;
+                return false;
+            }
+            function queryWithin(root, selector) {
+                const selectors = selector.split(',').map(s => s.trim());
+                const scope = root ? all.filter(el => el === root || isDescendant(el, root)) : all;
+                return scope.filter(el => el !== root && selectors.some(sel => matches(el, sel)));
+            }
+            function isDescendant(el, root) {
+                let cur = el.parentElement;
+                while (cur) { if (cur === root) return true; cur = cur.parentElement; }
+                return false;
+            }
+            function MouseEvent(type, init) { this.type = type; Object.assign(this, init); }
+            const window = { MouseEvent };
+            return eval(arguments[0]);
+        `);
+        return { result: evaluate.call({ events }, script), events };
     }
 
     // ──────────────────────────────────────────────────────
@@ -175,7 +260,7 @@ describe('ApprovalDetector - approval button detection and remote execution', ()
         );
     });
 
-    it('alwaysAllowButton() can directly click Allow This Conversation', async () => {
+    it('alwaysAllowButton() can directly click Yes, and always allow', async () => {
         mockCdpService.call.mockResolvedValue({
             result: { value: { ok: true } }
         });
@@ -192,7 +277,7 @@ describe('ApprovalDetector - approval button detection and remote execution', ()
         expect(mockCdpService.call).toHaveBeenCalledWith(
             'Runtime.evaluate',
             expect.objectContaining({
-                expression: expect.stringContaining('Allow This Conversation'),
+                expression: expect.stringContaining('Yes, and always allow'),
                 returnByValue: true,
                 contextId: 42,
             })
@@ -211,7 +296,7 @@ describe('ApprovalDetector - approval button detection and remote execution', ()
             }
 
             // Only succeed the conversation allow button click after expansion
-            if (expanded && expression.includes('Allow This Conversation')) {
+            if (expression.includes('Yes, and always allow')) {
                 return { result: { value: { ok: true } } } as any;
             }
 
@@ -229,8 +314,57 @@ describe('ApprovalDetector - approval button detection and remote execution', ()
         expect(result).toBe(true);
         const expressions = mockCdpService.call.mock.calls
             .map((call) => call?.[1]?.expression as string);
-        expect(expressions.some((exp) => exp.includes('ALLOW_ONCE_PATTERNS'))).toBe(true);
-        expect(expressions.some((exp) => exp.includes('Allow This Conversation'))).toBe(true);
+        expect(expressions.some((exp) => exp.includes('ALLOW_ONCE_PATTERNS'))).toBe(false);
+        expect(expressions.some((exp) => exp.includes('Yes, and always allow'))).toBe(true);
+    });
+
+    it('detects Antigravity URL permission radio-list prompts that require Submit', () => {
+        const { result } = runScriptInMockDom(DETECT_APPROVAL_SCRIPT);
+
+        expect(result).toEqual(expect.objectContaining({
+            approveText: 'Yes, allow this time',
+            alwaysAllowText: 'Yes, and always allow',
+            denyText: 'No (tell the agent what to do instead)',
+            description: expect.stringContaining('Allow reading this URL?'),
+            submitRequired: true,
+        }));
+        expect(result.description).toContain('To trigger the URL permission popup');
+    });
+
+    it('click script can select permission option divs that are not buttons', () => {
+        const { result, events } = runScriptInMockDom(buildClickScript('Yes, allow this time'));
+
+        expect(result).toEqual({ ok: true });
+        expect(events).toContain('Yes, allow this time:click');
+    });
+
+    it('approveButton selects radio-list permission option then clicks Submit', async () => {
+        const detectedInfo = makeApprovalInfo({
+            approveText: 'Yes, allow this time',
+            alwaysAllowText: 'Yes, and always allow',
+            denyText: 'No (tell the agent what to do instead)',
+            description: 'Allow reading this URL? — localhost',
+            submitRequired: true,
+        });
+
+        mockCdpService.call
+            .mockResolvedValueOnce({ result: { value: detectedInfo } })
+            .mockResolvedValue({ result: { value: { ok: true } } });
+
+        detector = new ApprovalDetector({
+            cdpService: mockCdpService,
+            pollIntervalMs: 500,
+            onApprovalRequired: jest.fn(),
+        });
+        detector.start();
+        await jest.advanceTimersByTimeAsync(500);
+
+        const result = await detector.approveButton();
+
+        expect(result).toBe(true);
+        const expressions = mockCdpService.call.mock.calls.map((call) => (call[1] as any).expression as string);
+        expect(expressions.some((exp) => exp.includes('Yes, allow this time'))).toBe(true);
+        expect(expressions.some((exp) => exp.includes('Submit'))).toBe(true);
     });
 
     // ──────────────────────────────────────────────────────
