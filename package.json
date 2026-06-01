@@ -23,7 +23,7 @@
     "test:unit": "jest",
     "test:integration": "jest tests/e2e.bot.test.ts",
     "test:watch": "jest --watch",
-    "prebuild": "rm -f tsconfig.tsbuildinfo",
+    "prebuild": "node -e \"try{require('fs').unlinkSync('tsconfig.tsbuildinfo')}catch(e){}\"",
     "build": "tsc",
     "start": "ts-node src/bin/cli.ts",
     "start:built": "node dist/bin/cli.js",
