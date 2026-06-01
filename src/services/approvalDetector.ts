@@ -415,22 +415,18 @@ export class ApprovalDetector {
 
         // Full scan: try every execution context reported by the CDP connection
         const contexts = this.cdpService.getContexts();
-        logger.info(`[ApprovalDetector] Scanning ${contexts.length} contexts: [${contexts.map(c => c.id).join(', ')}]`);
         for (const ctx of contexts) {
             if (ctx.id === this.lastDetectedContextId) continue;
             const info = await this.evaluateDetectScript(ctx.id);
-            logger.info(`[ApprovalDetector] ctx ${ctx.id} (${ctx.name || ''}): ${info ? 'FOUND approve=' + info.approveText : 'null'}`);
             if (info) return { info, contextId: ctx.id };
         }
 
         // Final fallback: default context (no contextId param)
         if (this.lastDetectedContextId !== null) {
             const info = await this.evaluateDetectScript(null);
-            logger.info(`[ApprovalDetector] default ctx: ${info ? 'FOUND approve=' + info.approveText : 'null'}`);
             if (info) return { info, contextId: null };
         }
 
-        logger.info(`[ApprovalDetector] No approval dialog found in any context`);
         return null;
     }
 

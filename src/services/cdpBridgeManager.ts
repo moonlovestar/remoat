@@ -270,8 +270,6 @@ export function ensureApprovalDetector(
             const targetChannel = resolveApprovalChannelForCurrentChat(bridge, projectName, currentChatTitle)
                 ?? bridge.lastActiveChannel;
 
-            logger.info(`[ApprovalDetector:${projectName}] targetChannel=${JSON.stringify(targetChannel)} botApi=${!!bridge.botApi}`);
-
             if (!targetChannel || !bridge.botApi) {
                 logger.warn(`[ApprovalDetector:${projectName}] Skipped — no target channel`);
                 return;
@@ -375,8 +373,6 @@ export function ensurePlanningDetector(
             const currentChatTitle = await getCurrentChatTitle(cdp);
             const targetChannel = resolveApprovalChannelForCurrentChat(bridge, projectName, currentChatTitle)
                 ?? bridge.lastActiveChannel;
-
-            logger.info(`[PlanningDetector:${projectName}] targetChannel=${JSON.stringify(targetChannel)} botApi=${!!bridge.botApi}`);
 
             if (!targetChannel || !bridge.botApi) {
                 logger.warn(`[PlanningDetector:${projectName}] Approval request skipped — no target channel`);
