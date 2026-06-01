@@ -619,6 +619,8 @@ export class PlanningDetector {
             }
 
             const contextId = this.cdpService.getPrimaryContextId();
+            logger.info(`[PlanningDetector] poll — contextId=${contextId} baseline=(notify:${this.baselineNotifyCount} card:${this.baselineCardCount} icon:${this.baselineIconCount})`);
+
             const callParams: Record<string, unknown> = {
                 expression: buildDetectPlanningScript(
                     this.lastClickedChip?.text || null,
@@ -635,8 +637,33 @@ export class PlanningDetector {
 
             const result = await this.cdpService.call('Runtime.evaluate', callParams);
 
-            // Expected shape: PlanningInfo | PlanningInfo+fileRefMode | { collapsed: true, chipText } | { autoOpened: true, chipText } | null
+            // Dump raw CDP result for diagnosis
+            if (result?.result?.subtype === 'error') {
+                logger.info(`[PlanningDetector] Script evaluation ERROR: ${result.result.description}`);
+            }
             const payload = result?.result?.value ?? null;
+            logger.info(`[PlanningDetector] Raw payload: ${JSON.stringify(payload)}`);
+
+            // Also run a diagnostic query to dump all .notify-user-container button texts
+            try {
+                const diagParams: Record<string, unknown> = {
+                    expression: `(() => {
+                        const cs = Array.from(document.querySelectorAll('.notify-user-container'));
+                        return cs.map((c, i) => ({
+                            i,
+                            buttons: Array.from(c.querySelectorAll('button,[role="button"]'))
+                                .map(b => ({ text: (b.textContent||'').trim().slice(0,60), visible: b.offsetParent!==null })),
+                        }));
+                    })()`,
+                    returnByValue: true,
+                    awaitPromise: false,
+                };
+                if (contextId !== null) diagParams.contextId = contextId;
+                const diagResult = await this.cdpService.call('Runtime.evaluate', diagParams);
+                logger.info(`[PlanningDetector] notify-user-container dump: ${JSON.stringify(diagResult?.result?.value)}`);
+            } catch (diagErr) {
+                logger.info(`[PlanningDetector] Diagnostic query failed: ${diagErr}`);
+            }
 
             if (payload && payload.collapsed) {
                 // We just initiated an auto-click on a collapsed chip
@@ -661,6 +688,7 @@ export class PlanningDetector {
                 // Permission dialog detected inside a notify-user-container — route to approval handler
                 this.lastClickedChip = null;
                 logger.info(`[PlanningDetector] Approval request detected: "${payload.approveText}" / "${payload.denyText}"`);
+                logger.info(`[PlanningDetector] onApprovalRequest handler registered: ${!!this.onApprovalRequest}`);
                 if (this.onApprovalRequest) {
                     Promise.resolve(this.onApprovalRequest(payload)).catch((err) => {
                         logger.error('[PlanningDetector] onApprovalRequest callback failed:', err);

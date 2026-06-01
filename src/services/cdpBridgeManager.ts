@@ -264,11 +264,13 @@ export function ensureApprovalDetector(
                 .catch((e) => logger.debug('[ApprovalDetector] Markup remove failed (expected if already removed):', e));
         },
         onApprovalRequired: async (info: ApprovalInfo) => {
-            logger.debug(`[ApprovalDetector:${projectName}] Approval detected`);
+            logger.info(`[ApprovalDetector:${projectName}] onApprovalRequired fired — approve="${info.approveText}" deny="${info.denyText}" desc="${info.description?.slice(0, 80)}"`);
 
             const currentChatTitle = await getCurrentChatTitle(cdp);
             const targetChannel = resolveApprovalChannelForCurrentChat(bridge, projectName, currentChatTitle)
                 ?? bridge.lastActiveChannel;
+
+            logger.info(`[ApprovalDetector:${projectName}] targetChannel=${JSON.stringify(targetChannel)} botApi=${!!bridge.botApi}`);
 
             if (!targetChannel || !bridge.botApi) {
                 logger.warn(`[ApprovalDetector:${projectName}] Skipped — no target channel`);
@@ -368,11 +370,13 @@ export function ensurePlanningDetector(
             await sendTelegramMessage(bridge.botApi, targetChannel, text);
         },
         onApprovalRequest: async (info) => {
-            logger.info(`[PlanningDetector:${projectName}] Approval request routed from planning detector`);
+            logger.info(`[PlanningDetector:${projectName}] Approval request routed — approve="${info.approveText}" deny="${info.denyText}" desc="${info.description?.slice(0, 80)}"`);
             const approvalDetector = bridge.pool.getApprovalDetector(projectName);
             const currentChatTitle = await getCurrentChatTitle(cdp);
             const targetChannel = resolveApprovalChannelForCurrentChat(bridge, projectName, currentChatTitle)
                 ?? bridge.lastActiveChannel;
+
+            logger.info(`[PlanningDetector:${projectName}] targetChannel=${JSON.stringify(targetChannel)} botApi=${!!bridge.botApi}`);
 
             if (!targetChannel || !bridge.botApi) {
                 logger.warn(`[PlanningDetector:${projectName}] Approval request skipped — no target channel`);

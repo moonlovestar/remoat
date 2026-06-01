@@ -415,18 +415,22 @@ export class ApprovalDetector {
 
         // Full scan: try every execution context reported by the CDP connection
         const contexts = this.cdpService.getContexts();
+        logger.info(`[ApprovalDetector] Scanning ${contexts.length} contexts: [${contexts.map(c => c.id).join(', ')}]`);
         for (const ctx of contexts) {
-            if (ctx.id === this.lastDetectedContextId) continue; // already tried above
+            if (ctx.id === this.lastDetectedContextId) continue;
             const info = await this.evaluateDetectScript(ctx.id);
+            logger.info(`[ApprovalDetector] ctx ${ctx.id} (${ctx.name || ''}): ${info ? 'FOUND approve=' + info.approveText : 'null'}`);
             if (info) return { info, contextId: ctx.id };
         }
 
         // Final fallback: default context (no contextId param)
         if (this.lastDetectedContextId !== null) {
             const info = await this.evaluateDetectScript(null);
+            logger.info(`[ApprovalDetector] default ctx: ${info ? 'FOUND approve=' + info.approveText : 'null'}`);
             if (info) return { info, contextId: null };
         }
 
+        logger.info(`[ApprovalDetector] No approval dialog found in any context`);
         return null;
     }
 
@@ -443,11 +447,16 @@ export class ApprovalDetector {
             }
             const result = await this.cdpService.call('Runtime.evaluate', callParams);
             if (result?.result?.subtype === 'error') {
-                logger.debug(`[ApprovalDetector] Script error in ctx ${contextId}:`, result.result.description);
+                logger.info(`[ApprovalDetector] Script error in ctx ${contextId}: ${result.result.description}`);
+                return null;
             }
-            return result?.result?.value ?? null;
+            const value = result?.result?.value ?? null;
+            if (value) {
+                logger.info(`[ApprovalDetector] SCRIPT HIT ctx ${contextId}: ${JSON.stringify(value)}`);
+            }
+            return value;
         } catch (e) {
-            logger.debug(`[ApprovalDetector] Eval failed in ctx ${contextId}:`, (e as Error)?.message?.slice(0, 80));
+            logger.info(`[ApprovalDetector] Eval exception ctx ${contextId}: ${(e as Error)?.message?.slice(0, 120)}`);
             return null;
         }
     }
