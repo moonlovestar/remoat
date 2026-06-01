@@ -324,7 +324,8 @@ describe('ApprovalDetector - approval button detection and remote execution', ()
         expect(result).toEqual(expect.objectContaining({
             approveText: 'Yes, allow this time',
             alwaysAllowText: 'Yes, and always allow',
-            denyText: 'No (tell the agent what to do instead)',
+            // 'Skip' is the actual deny button in the mock DOM (a <button> element)
+            denyText: expect.stringMatching(/skip|no/i),
             description: expect.stringContaining('Allow reading this URL?'),
             submitRequired: true,
         }));

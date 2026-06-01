@@ -51,7 +51,7 @@ export const DETECT_APPROVAL_SCRIPT = `(() => {
         'いいえ', 'キャンセル', '拒絕授權', 'other (write your answer)',
     ];
 
-    const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+    const normalize = (text) => (text || '').toLowerCase().replace(/[^\\w\\s,]/g, ' ').replace(/\\s+/g, ' ').trim();
     // offsetParent is null for position:fixed elements in Chrome — use getBoundingClientRect as fallback
     const isVisible = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
 
@@ -247,7 +247,7 @@ const EXPAND_ALWAYS_ALLOW_MENU_SCRIPT = `(() => {
         '[class*="item"][tabindex]',
     ];
 
-    const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+    const normalize = (text) => (text || '').toLowerCase().replace(/[^\\w\\s,]/g, ' ').replace(/\\s+/g, ' ').trim();
     const isVisible = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
     const visibleItems = Array.from(document.querySelectorAll(CLICKABLE_SELECTORS.join(',')))
         .filter(isVisible);
@@ -318,7 +318,7 @@ const EXPAND_ALWAYS_ALLOW_MENU_SCRIPT = `(() => {
 export function buildClickScript(buttonText: string): string {
     const safeText = JSON.stringify(buttonText);
     return `(() => {
-        const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+        const normalize = (text) => (text || '').toLowerCase().replace(/[^\\w\\s,]/g, ' ').replace(/\\s+/g, ' ').trim();
         const text = ${safeText};
         const wanted = normalize(text);
         const isVisible = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);

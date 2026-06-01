@@ -538,7 +538,7 @@ export const RESPONSE_SELECTORS = {
         // onComplete immediately and Telegram receives the previous (stale) response.
         let approvalActive = false;
         const ALLOW_ONCE_NORM = ['yes, allow this time', 'yes, allow once', 'allow this time', 'allow once', 'allow one time', '許可', '一度許可'];
-        const normApproval = (t) => (t || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        const normApproval = (t) => (t || '').toLowerCase().replace(/[^\\w\\s,]/g, ' ').replace(/\\s+/g, ' ').trim();
         const isVisibleEl = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
         const allEls = Array.from(document.querySelectorAll('*'));
         const approveCandidate = allEls.find(el => {
@@ -1127,6 +1127,47 @@ export class ResponseMonitor {
 
                 if (Array.isArray(combined.processLogs)) {
                     this.emitNewProcessLogs(combined.processLogs);
+                }
+            }
+
+            // If the primary-context poll didn't detect approvalActive, scan ALL contexts.
+            // The permission dialog may live in a different execution context (e.g. a separate
+            // webview frame) that getPrimaryContextId() doesn't point to.
+            if (!approvalActive) {
+                const APPROVAL_SCAN = `(() => {
+                    const norm = t => (t||'').toLowerCase().replace(/[^\\\\w\\\\s,]/g,' ').replace(/\\\\s+/g,' ').trim();
+                    const isVis = el => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
+                    const ALLOW_ONCE = ['yes, allow this time','yes, allow once','allow this time','allow once','allow one time'];
+                    const candidate = Array.from(document.querySelectorAll('*')).find(el => {
+                        if (!isVis(el)) return false;
+                        if (el.children.length > 8) return false;
+                        const t = norm(el.textContent||'');
+                        return t.length > 0 && t.length <= 180 && ALLOW_ONCE.some(p => t.includes(p));
+                    });
+                    if (!candidate) return false;
+                    let anc = candidate.parentElement;
+                    for (let i = 0; i < 12 && anc && anc !== document.body; i++) {
+                        const sub = Array.from(anc.querySelectorAll('button,[role="button"]')).filter(isVis);
+                        if (sub.find(b => norm(b.textContent||b.getAttribute('aria-label')||'') === 'submit')) return true;
+                        anc = anc.parentElement;
+                    }
+                    return false;
+                })()`;
+                const contexts = this.cdpService.getContexts?.() ?? [];
+                for (const ctx of contexts) {
+                    try {
+                        const res = await this.cdpService.call('Runtime.evaluate', {
+                            expression: APPROVAL_SCAN,
+                            returnByValue: true,
+                            awaitPromise: false,
+                            contextId: ctx.id,
+                        });
+                        if (res?.result?.value === true) {
+                            approvalActive = true;
+                            logger.info(`[ResponseMonitor] approvalActive detected in ctx ${ctx.id} (not primary context)`);
+                            break;
+                        }
+                    } catch { /* context may not support evaluation */ }
                 }
             }
 
