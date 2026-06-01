@@ -267,7 +267,8 @@ export function ensureApprovalDetector(
             logger.debug(`[ApprovalDetector:${projectName}] Approval detected`);
 
             const currentChatTitle = await getCurrentChatTitle(cdp);
-            const targetChannel = resolveApprovalChannelForCurrentChat(bridge, projectName, currentChatTitle);
+            const targetChannel = resolveApprovalChannelForCurrentChat(bridge, projectName, currentChatTitle)
+                ?? bridge.lastActiveChannel;
 
             if (!targetChannel || !bridge.botApi) {
                 logger.warn(`[ApprovalDetector:${projectName}] Skipped — no target channel`);

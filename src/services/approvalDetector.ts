@@ -34,6 +34,7 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
     const ALLOW_ONCE_PATTERNS = [
         'yes, allow this time',
         'yes, allow once',
+        'allow this time',
         'allow once',
         'allow one time',
         '今回のみ許可',
@@ -50,7 +51,13 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
         'この会話を許可',
     ];
     const ALLOW_PATTERNS = ['yes, allow', 'allow', 'permit', 'run', 'execute', '許可', '承認', '確認', '実行'];
-    const DENY_PATTERNS = ['no (', 'no,', 'no.', 'deny', 'reject', '拒否', 'decline', '却下', 'skip'];
+    const DENY_PATTERNS = [
+        "don't run", "don't allow", "don't",
+        'no (', 'no,', 'no.', 'no!',
+        'deny', 'reject', '拒否', 'decline', '却下', 'skip',
+        'cancel', 'not now', 'dismiss', 'close', 'abort',
+        'いいえ', 'キャンセル',
+    ];
 
     const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
 
@@ -111,8 +118,6 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
         return DENY_PATTERNS.some(p => t.includes(p));
     }) || null;
 
-    if (!denyBtn) return null;
-
     const alwaysAllowBtn = containerItems.find(el => {
         const t = normalize(el.textContent || '');
         return ALWAYS_ALLOW_PATTERNS.some(p => t.includes(p));
@@ -120,7 +125,7 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
 
     const approveText = (approveBtn.textContent || '').trim();
     const alwaysAllowText = alwaysAllowBtn ? (alwaysAllowBtn.textContent || '').trim() : '';
-    const denyText = (denyBtn.textContent || '').trim();
+    const denyText = denyBtn ? (denyBtn.textContent || '').trim() : '';
 
     // --- Description extraction (multiple fallbacks) ---
     let description = '';
@@ -174,6 +179,7 @@ const EXPAND_ALWAYS_ALLOW_MENU_SCRIPT = `(() => {
     const ALLOW_ONCE_PATTERNS = [
         'yes, allow this time',
         'yes, allow once',
+        'allow this time',
         'allow once',
         'allow one time',
         '今回のみ許可',
