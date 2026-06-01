@@ -730,6 +730,12 @@ export class ResponseMonitor {
     private lastExtractionSource: 'structured' | 'legacy' | null = null;
     /** Consecutive WebSocket error count — stops monitor after threshold */
     private consecutiveWsErrors: number = 0;
+    /**
+     * True while an approval/permission dialog was active in the previous poll.
+     * Used to detect the transition approval→generating so we can discard the
+     * pre-approval lastText and wait for the fresh post-approval response.
+     */
+    private approvalWasActive: boolean = false;
 
     /**
      * Baseline artifact counts captured at monitoring start.
@@ -1131,6 +1137,14 @@ export class ResponseMonitor {
                     this.generationStarted = true;
                     this.setPhase('thinking', null);
                 }
+                // If a new generation started right after an approval dialog was dismissed,
+                // discard the pre-approval lastText so onComplete sends the fresh response.
+                if (this.approvalWasActive) {
+                    this.approvalWasActive = false;
+                    this.lastText = null;
+                    this.baselineText = null;
+                    logger.info('[ResponseMonitor] New generation detected after approval — cleared stale lastText');
+                }
                 this.stopGoneCount = 0;
             }
 
@@ -1182,6 +1196,7 @@ export class ResponseMonitor {
                 // send the permission prompt to Telegram instead of the stale response.
                 if (approvalActive) {
                     this.stopGoneCount = 0;
+                    this.approvalWasActive = true;
                     logger.info('[ResponseMonitor] Approval/permission dialog active — deferring completion');
                 // Planning check already done in combined poll script
                 } else if (planningActive) {

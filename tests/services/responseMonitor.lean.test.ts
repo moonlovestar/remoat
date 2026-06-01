@@ -613,4 +613,64 @@ describe('Lean ResponseMonitor (new API)', () => {
 
         await monitor.stop();
     });
+
+    it('discards stale pre-approval text when new generation starts after approval', async () => {
+        const onComplete = jest.fn();
+        const monitor = new ResponseMonitor({
+            cdpService,
+            pollIntervalMs: 500,
+            stopGoneConfirmCount: 1,
+            onComplete,
+        } as any);
+
+        cdpService.call
+            .mockResolvedValueOnce(cdpResult({ notifyCount: 0, cardCount: 0 }))
+            .mockResolvedValueOnce(cdpResult(null))
+            .mockResolvedValueOnce(cdpResult(null));
+        await monitor.start();
+
+        // Poll 1: first generation running — produces stale text
+        cdpService.call.mockResolvedValueOnce(combinedResult({ isGenerating: true, responseText: 'stale old response' }));
+        await jest.advanceTimersByTimeAsync(500);
+
+        // Poll 2: stop gone + approval dialog active — defer
+        cdpService.call.mockResolvedValueOnce(combinedResult({
+            isGenerating: false,
+            responseText: 'stale old response',
+            approvalActive: true,
+        }));
+        await jest.advanceTimersByTimeAsync(500);
+        expect(onComplete).not.toHaveBeenCalled();
+
+        // Poll 3: user approved — new generation starts (stop button back)
+        cdpService.call.mockResolvedValueOnce(combinedResult({
+            isGenerating: true,
+            responseText: 'stale old response',
+            approvalActive: false,
+        }));
+        await jest.advanceTimersByTimeAsync(500);
+        expect(onComplete).not.toHaveBeenCalled();
+
+        // Poll 4: new generation produces fresh response text
+        cdpService.call.mockResolvedValueOnce(combinedResult({
+            isGenerating: true,
+            responseText: 'fresh response after approval',
+            approvalActive: false,
+        }));
+        await jest.advanceTimersByTimeAsync(500);
+        expect(onComplete).not.toHaveBeenCalled();
+
+        // Poll 5: new generation complete — onComplete must fire with fresh text
+        cdpService.call.mockResolvedValueOnce(combinedResult({
+            isGenerating: false,
+            responseText: 'fresh response after approval',
+            approvalActive: false,
+        }));
+        await jest.advanceTimersByTimeAsync(500);
+        expect(onComplete).toHaveBeenCalledTimes(1);
+        // The text passed to onComplete must be the fresh post-approval response
+        expect(onComplete.mock.calls[0][0]).toBe('fresh response after approval');
+
+        await monitor.stop();
+    });
 });
