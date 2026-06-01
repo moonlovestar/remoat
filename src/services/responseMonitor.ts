@@ -736,6 +736,8 @@ export class ResponseMonitor {
      * pre-approval lastText and wait for the fresh post-approval response.
      */
     private approvalWasActive: boolean = false;
+    /** One-shot: dump DOM when approvalActive first fires (or when stop gone without it) */
+    private approvalDiagDone: boolean = false;
 
     /**
      * Baseline artifact counts captured at monitoring start.
@@ -1198,6 +1200,61 @@ export class ResponseMonitor {
                     this.stopGoneCount = 0;
                     this.approvalWasActive = true;
                     logger.info('[ResponseMonitor] Approval/permission dialog active — deferring completion');
+                    // One-shot DOM diagnostic — log what the browser actually sees
+                    if (!this.approvalDiagDone) {
+                        this.approvalDiagDone = true;
+                        const diagExpr = `(() => {
+                            const norm = t => (t||'').toLowerCase().replace(/\\s+/g,' ').trim();
+                            const isVis = el => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
+                            // Dump all visible buttons
+                            const btns = Array.from(document.querySelectorAll('button,[role="button"]'))
+                                .filter(isVis).map(b => norm(b.textContent||b.getAttribute('aria-label')||'').slice(0,60));
+                            // Dump all visible elements containing allow-once text
+                            const ALLOW_ONCE = ['yes, allow this time','yes, allow once','allow this time','allow once'];
+                            const allowEls = Array.from(document.querySelectorAll('*')).filter(el => {
+                                if (!isVis(el)) return false;
+                                if (el.children.length > 8) return false;
+                                const t = norm(el.textContent||'');
+                                return t.length > 0 && t.length <= 180 && ALLOW_ONCE.some(p => t.includes(p));
+                            }).map(el => ({
+                                tag: el.tagName,
+                                cls: (el.className||'').slice(0,60),
+                                text: norm(el.textContent||'').slice(0,80),
+                                childCount: el.children.length,
+                            }));
+                            // Dump outerHTML of the permission dialog container (up to 1000 chars)
+                            let dialogHtml = '';
+                            for (const el of allowEls) {
+                                // find the actual element
+                            }
+                            const allEls = Array.from(document.querySelectorAll('*')).filter(el => {
+                                if (!isVis(el)) return false;
+                                if (el.children.length > 8) return false;
+                                const t = norm(el.textContent||'');
+                                return ALLOW_ONCE.some(p => t === p);
+                            });
+                            if (allEls.length > 0) {
+                                let anc = allEls[0].parentElement;
+                                for (let i = 0; i < 8 && anc && anc !== document.body; i++) {
+                                    const sub = Array.from(anc.querySelectorAll('button,[role="button"]')).filter(isVis);
+                                    if (sub.find(b => norm(b.textContent||b.getAttribute('aria-label')||'') === 'submit')) {
+                                        dialogHtml = anc.outerHTML.slice(0, 1200);
+                                        break;
+                                    }
+                                    anc = anc.parentElement;
+                                }
+                                if (!dialogHtml) dialogHtml = (allEls[0].parentElement?.outerHTML||'').slice(0,600);
+                            }
+                            return { btns, allowEls, dialogHtml };
+                        })()`;
+                        try {
+                            const diagParams = this.buildEvaluateParams(diagExpr);
+                            const diagRes = await this.cdpService.call('Runtime.evaluate', diagParams);
+                            logger.info('[ResponseMonitor] approvalActive DIAG: ' + JSON.stringify(diagRes?.result?.value));
+                        } catch (e) {
+                            logger.info('[ResponseMonitor] approvalActive DIAG error: ' + e);
+                        }
+                    }
                 // Planning check already done in combined poll script
                 } else if (planningActive) {
                     this.stopGoneCount = 0;
@@ -1237,6 +1294,47 @@ export class ResponseMonitor {
                     }
                 } else {
                     this.stopGoneCount++;
+                    // One-shot: dump DOM state when completion fires — helps diagnose
+                    // cases where a permission dialog is present but approvalActive=false
+                    if (!this.approvalDiagDone && this.stopGoneCount === 1) {
+                        this.approvalDiagDone = true;
+                        const diagExpr = `(() => {
+                            const norm = t => (t||'').toLowerCase().replace(/\\s+/g,' ').trim();
+                            const isVis = el => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
+                            const ALLOW_ONCE = ['yes, allow this time','yes, allow once','allow this time','allow once'];
+                            const btns = Array.from(document.querySelectorAll('button,[role="button"]'))
+                                .filter(isVis).map(b => norm(b.textContent||b.getAttribute('aria-label')||'').slice(0,60));
+                            const allowEls = Array.from(document.querySelectorAll('*')).filter(el => {
+                                if (!isVis(el)) return false;
+                                if (el.children.length > 8) return false;
+                                const t = norm(el.textContent||'');
+                                return t.length > 0 && t.length <= 180 && ALLOW_ONCE.some(p => t.includes(p));
+                            }).map(el => ({
+                                tag: el.tagName,
+                                cls: (el.className||'').slice(0,60),
+                                text: norm(el.textContent||'').slice(0,80),
+                                childCount: el.children.length,
+                            }));
+                            // Dump outerHTML of any element containing allow-once text (exact match)
+                            const exactEls = Array.from(document.querySelectorAll('*')).filter(el => {
+                                if (!isVis(el)) return false;
+                                if (el.children.length > 8) return false;
+                                const t = norm(el.textContent||'');
+                                return ALLOW_ONCE.some(p => t === p);
+                            });
+                            const dialogHtml = exactEls.length > 0
+                                ? (exactEls[0].closest('[role="dialog"],.modal,.dialog') || exactEls[0].parentElement?.parentElement || exactEls[0].parentElement || exactEls[0])?.outerHTML?.slice(0,1200) || ''
+                                : '';
+                            return { btns, allowEls, dialogHtml, allowElCount: allowEls.length };
+                        })()`;
+                        try {
+                            const diagParams = this.buildEvaluateParams(diagExpr);
+                            const diagRes = await this.cdpService.call('Runtime.evaluate', diagParams);
+                            logger.info('[ResponseMonitor] completion-without-approvalActive DIAG: ' + JSON.stringify(diagRes?.result?.value));
+                        } catch (e) {
+                            logger.info('[ResponseMonitor] completion DIAG error: ' + e);
+                        }
+                    }
                     if (this.stopGoneCount >= this.stopGoneConfirmCount && this.isRunning) {
                         const finalText = this.lastText ?? '';
                         this.setPhase('complete', finalText);

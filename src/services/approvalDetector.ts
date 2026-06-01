@@ -381,6 +381,7 @@ export class ApprovalDetector {
 
     private pollTimer: NodeJS.Timeout | null = null;
     private isRunning: boolean = false;
+    private pollCount: number = 0;
     /** Key of the last detected button info (for duplicate notification prevention) */
     private lastDetectedKey: string | null = null;
     /** Full ApprovalInfo from the last detection (used for clicking) */
@@ -446,6 +447,7 @@ export class ApprovalDetector {
      */
     private async poll(): Promise<void> {
         try {
+            this.pollCount++;
             const detected = await this.detectApproval();
             const info = detected?.info ?? null;
 
@@ -460,6 +462,10 @@ export class ApprovalDetector {
                     });
                 }
             } else {
+                // Log every 5th miss so we can confirm the detector is alive
+                if (this.pollCount % 5 === 0) {
+                    logger.info(`[ApprovalDetector] poll #${this.pollCount} — no approval dialog found`);
+                }
                 const wasDetected = this.lastDetectedKey !== null;
                 this.lastDetectedKey = null;
                 this.lastDetectedInfo = null;
