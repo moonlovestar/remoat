@@ -697,6 +697,7 @@ export class ResponseMonitor {
     private seenProcessLogKeys: Set<string> = new Set();
     private seenThinkingLogKeys: Set<string> = new Set();
     private structuredDiagLogged: boolean = false;
+    private planningActiveDiagDone: boolean = false;
     private lastExtractionSource: 'structured' | 'legacy' | null = null;
     /** Consecutive WebSocket error count — stops monitor after threshold */
     private consecutiveWsErrors: number = 0;
@@ -759,6 +760,7 @@ export class ResponseMonitor {
         this.currentPhase = passive ? 'generating' : 'waiting';
         this.stopGoneCount = 0;
         this.quotaDetected = false;
+        this.planningActiveDiagDone = false;
         this.seenProcessLogKeys = new Set();
         this.seenThinkingLogKeys = new Set();
         this.consecutiveWsErrors = 0;
@@ -1148,6 +1150,39 @@ export class ResponseMonitor {
                 if (planningActive) {
                     this.stopGoneCount = 0;
                     logger.info('[ResponseMonitor] Planning dialog active — deferring completion');
+                    // One-shot diagnostic: dump what triggered planningActive
+                    if (!this.planningActiveDiagDone) {
+                        this.planningActiveDiagDone = true;
+                        const diagExpr = `(() => {
+                            const OPEN_PAT = ['open', 'view'];
+                            const norm = t => (t||'').toLowerCase().replace(/\\s+/g,' ').trim();
+                            const allC = Array.from(document.querySelectorAll('.notify-user-container'));
+                            const notifyInfo = allC.map((c,i) => ({
+                                i,
+                                html: c.outerHTML.slice(0,300),
+                                buttons: Array.from(c.querySelectorAll('button,[role="button"]')).map(b=>({
+                                    text:(b.textContent||'').trim().slice(0,60),
+                                    visible:b.offsetParent!==null,
+                                    role:b.getAttribute('role'),
+                                })),
+                            }));
+                            const allCards = Array.from(document.body.querySelectorAll('div[class*="border"][class*="rounded-lg"]'))
+                                .filter(el=>el.offsetParent!==null).slice(-3);
+                            const cardInfo = allCards.map(c=>({
+                                classes:c.className.slice(0,80),
+                                html:c.outerHTML.slice(0,200),
+                                buttons:Array.from(c.querySelectorAll('button')).map(b=>(b.textContent||'').trim().slice(0,40)),
+                            }));
+                            return { notifyCount: allC.length, notifyInfo, cardCount: allCards.length, cardInfo };
+                        })()`;
+                        try {
+                            const diagParams = this.buildEvaluateParams(diagExpr);
+                            const diagRes = await this.cdpService.call('Runtime.evaluate', diagParams);
+                            logger.info('[ResponseMonitor] planningActive DIAG: ' + JSON.stringify(diagRes?.result?.value));
+                        } catch (e) {
+                            logger.info('[ResponseMonitor] planningActive DIAG error: ' + e);
+                        }
+                    }
                 } else {
                     this.stopGoneCount++;
                     if (this.stopGoneCount >= this.stopGoneConfirmCount && this.isRunning) {
