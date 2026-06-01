@@ -750,6 +750,27 @@ async function sendPromptToAntigravity(
                         }
                     } catch (e) { logger.error('[Bot] Failed to send thinking block:', e); }
 
+                    // One-shot permission-dialog diagnostic: dump all CDP targets + all visible
+                    // buttons in the page so we can see if a permission dialog appeared
+                    try {
+                        const targets = await cdp.listAllTargets();
+                        logger.info(`[DIAG] CDP targets: ${JSON.stringify(targets)}`);
+
+                        const btnScript = `(() => {
+                            const btns = Array.from(document.querySelectorAll('button,[role="button"]'))
+                                .filter(b => b.offsetParent !== null || (b.getBoundingClientRect().width > 0 && b.getBoundingClientRect().height > 0))
+                                .map(b => ({ text: (b.textContent||'').trim().slice(0,50), cls: (b.className||'').slice(0,60) }));
+                            const notify = Array.from(document.querySelectorAll('.notify-user-container'))
+                                .map(c => ({ html: c.outerHTML.slice(0,400) }));
+                            return { btnCount: btns.length, btns: btns.slice(0,30), notifyCount: notify.length, notify };
+                        })()`;
+                        const ctxId = cdp.getPrimaryContextId();
+                        const diagParams: Record<string, unknown> = { expression: btnScript, returnByValue: true, awaitPromise: false };
+                        if (ctxId !== null) diagParams.contextId = ctxId;
+                        const diagRes = await cdp.call('Runtime.evaluate', diagParams);
+                        logger.info(`[DIAG] DOM at completion: ${JSON.stringify(diagRes?.result?.value)}`);
+                    } catch (e) { logger.info(`[DIAG] Diagnostic failed: ${e}`); }
+
                     if (finalOutputText && finalOutputText.trim().length > 0) {
                         logger.divider(`Output (${finalOutputText.length} chars)`);
                         console.info(finalOutputText);

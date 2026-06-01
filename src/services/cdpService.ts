@@ -85,6 +85,8 @@ export class CdpService extends EventEmitter {
     private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
     /** Timestamp of last pong received */
     private lastPongTime: number = 0;
+    /** Port on which the active CDP connection was established */
+    private activePort: number | null = null;
 
     constructor(options: CdpServiceOptions = {}) {
         super();
@@ -451,11 +453,30 @@ export class CdpService extends EventEmitter {
 
         this.disconnectQuietly();
         this.targetUrl = page.webSocketDebuggerUrl;
+        // Extract port from the WebSocket URL for later use in diagnostics
+        const portMatch = page.webSocketDebuggerUrl?.match(/:(\d+)\//);
+        if (portMatch) this.activePort = parseInt(portMatch[1], 10);
         await this.connect();
         this.currentWorkspaceName = projectName;
         logger.debug(`[CdpService] Connected to workspace "${projectName}"`);
 
         return true;
+    }
+
+    /** List all CDP targets on the active port. Returns [] on failure. */
+    async listAllTargets(): Promise<{ id: string; type: string; title: string; url: string }[]> {
+        const port = this.activePort ?? this.ports[0];
+        try {
+            const list = await this.getJson(`http://127.0.0.1:${port}/json/list`);
+            return (list || []).map((t: any) => ({
+                id: t.id ?? '',
+                type: t.type ?? '',
+                title: (t.title ?? '').slice(0, 80),
+                url: (t.url ?? '').slice(0, 120),
+            }));
+        } catch {
+            return [];
+        }
     }
 
     /**
