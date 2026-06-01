@@ -30,25 +30,15 @@ export interface ApprovalDetectorOptions {
  * Detects allow/deny button pairs and extracts descriptions with fallbacks.
  */
 const DETECT_APPROVAL_SCRIPT = `(() => {
-    // --- Text pattern sets (ordered from most-specific to most-general) ---
     const ALLOW_ONCE_PATTERNS = [
-        'yes, allow this time',
-        'yes, allow once',
-        'allow this time',
-        'allow once',
-        'allow one time',
-        '今回のみ許可',
-        '1回のみ許可',
-        '一度許可',
+        'yes, allow this time', 'yes, allow once', 'allow this time',
+        'allow once', 'allow one time',
+        '今回のみ許可', '1回のみ許可', '一度許可', '同意授權',
     ];
     const ALWAYS_ALLOW_PATTERNS = [
-        'yes, and always allow',
-        'yes, always allow',
-        'allow this conversation',
-        'allow this chat',
-        'always allow',
-        '常に許可',
-        'この会話を許可',
+        'yes, and always allow', 'yes, always allow',
+        'allow this conversation', 'allow this chat', 'always allow',
+        '常に許可', 'この会話を許可',
     ];
     const ALLOW_PATTERNS = ['yes, allow', 'allow', 'permit', 'run', 'execute', '許可', '承認', '確認', '実行', '同意授權'];
     const DENY_PATTERNS = [
@@ -56,123 +46,107 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
         'no (', 'no,', 'no.', 'no!',
         'deny', 'reject', '拒否', 'decline', '却下', 'skip',
         'cancel', 'not now', 'dismiss', 'close', 'abort',
-        'いいえ', 'キャンセル',
-        '拒絕授權', 'other (write your answer)',
+        'いいえ', 'キャンセル', '拒絕授權', 'other (write your answer)',
     ];
 
     const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
     // offsetParent is null for position:fixed elements in Chrome — use getBoundingClientRect as fallback
     const isVisible = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
 
-    // Collect all visible interactive elements — buttons AND list/option items
     const CLICKABLE_SELECTORS = [
-        'button',
-        '[role="option"]',
-        '[role="listitem"]',
-        '[role="menuitem"]',
-        'li[tabindex]',
-        '[class*="option"][tabindex]',
-        '[class*="item"][tabindex]',
+        'button', '[role="button"]',
+        '[role="option"]', '[role="listitem"]', '[role="menuitem"]',
+        'li[tabindex]', '[class*="option"][tabindex]', '[class*="item"][tabindex]',
     ];
-    const allInteractive = Array.from(
-        document.querySelectorAll(CLICKABLE_SELECTORS.join(','))
-    ).filter(isVisible);
 
-    let approveBtn = allInteractive.find(el => {
-        const t = normalize(el.textContent || '');
-        return ALLOW_ONCE_PATTERNS.some(p => t.includes(p));
-    }) || null;
-
-    if (!approveBtn) {
-        approveBtn = allInteractive.find(el => {
-            const t = normalize(el.textContent || '');
-            const isAlways = ALWAYS_ALLOW_PATTERNS.some(p => t.includes(p));
-            return !isAlways && ALLOW_PATTERNS.some(p => t.includes(p));
-        }) || null;
-    }
-
-    if (!approveBtn) return null;
-
-    // Find container: prefer an ancestor with a role=dialog/modal class,
-    // fall back to walking up until we find a sibling deny element.
-    let container = approveBtn.closest(
-        '[role="dialog"], .modal, .dialog, .approval-container, .permission-dialog, [class*="permission"], [class*="approval"]'
-    );
-    if (!container) {
-        let el = approveBtn.parentElement;
-        for (let i = 0; i < 8 && el && el !== document.body; i++) {
-            const candidates = Array.from(el.querySelectorAll(CLICKABLE_SELECTORS.join(',')))
-                .filter(isVisible);
-            if (candidates.some(b => DENY_PATTERNS.some(p => normalize(b.textContent || '').includes(p)))) {
-                container = el;
-                break;
-            }
-            el = el.parentElement;
+    function findApprovalInContainer(container) {
+        const items = Array.from(container.querySelectorAll(CLICKABLE_SELECTORS.join(','))).filter(isVisible);
+        let approveBtn = items.find(el => ALLOW_ONCE_PATTERNS.some(p => normalize(el.textContent || '').includes(p))) || null;
+        if (!approveBtn) {
+            approveBtn = items.find(el => {
+                const t = normalize(el.textContent || '');
+                return !ALWAYS_ALLOW_PATTERNS.some(p => t.includes(p)) && ALLOW_PATTERNS.some(p => t.includes(p));
+            }) || null;
         }
+        if (!approveBtn) return null;
+        const denyBtn = items.find(el => DENY_PATTERNS.some(p => normalize(el.textContent || '').includes(p))) || null;
+        const alwaysAllowBtn = items.find(el => ALWAYS_ALLOW_PATTERNS.some(p => normalize(el.textContent || '').includes(p))) || null;
+        return { approveBtn, denyBtn, alwaysAllowBtn };
     }
-    if (!container) container = document.body;
 
-    const containerItems = Array.from(
-        container.querySelectorAll(CLICKABLE_SELECTORS.join(','))
-    ).filter(isVisible);
-
-    const denyBtn = containerItems.find(el => {
-        const t = normalize(el.textContent || '');
-        return DENY_PATTERNS.some(p => t.includes(p));
-    }) || null;
-
-    const alwaysAllowBtn = containerItems.find(el => {
-        const t = normalize(el.textContent || '');
-        return ALWAYS_ALLOW_PATTERNS.some(p => t.includes(p));
-    }) || null;
-
-    const approveText = (approveBtn.textContent || '').trim();
-    const alwaysAllowText = alwaysAllowBtn ? (alwaysAllowBtn.textContent || '').trim() : '';
-    const denyText = denyBtn ? (denyBtn.textContent || '').trim() : '';
-
-    // --- Description extraction (multiple fallbacks) ---
-    let description = '';
-
-    // 1. Dedicated title/description elements in the dialog
-    const titleEl = container.querySelector(
-        'h1, h2, h3, [role="heading"], [class*="title"], [class*="heading"], [class*="label"]'
-    );
-    const bodyEl = container.querySelector(
-        'p, .description, [data-testid="description"], [class*="body"], [class*="detail"], [class*="subtitle"], code'
-    );
-    if (titleEl) {
-        description = (titleEl.textContent || '').trim();
-        // Append a detail line if present (e.g. the URL / domain)
-        if (bodyEl) {
-            const detail = (bodyEl.textContent || '').trim();
-            if (detail && detail !== description) {
-                description += ' — ' + detail;
-            }
+    function extractDescription(container, approveBtn) {
+        const titleEl = container.querySelector('h1, h2, h3, [role="heading"], [class*="title"], [class*="heading"], [class*="label"]');
+        const bodyEl = container.querySelector('p, .description, [data-testid="description"], [class*="body"], [class*="detail"], [class*="subtitle"], code');
+        if (titleEl) {
+            let desc = (titleEl.textContent || '').trim();
+            if (bodyEl) { const d = (bodyEl.textContent || '').trim(); if (d && d !== desc) desc += ' — ' + d; }
+            if (desc) return desc;
         }
-    }
-
-    // 2. Parent element text excluding interactive children
-    if (!description) {
         const parent = approveBtn.parentElement?.parentElement || approveBtn.parentElement;
         if (parent) {
             const clone = parent.cloneNode(true);
             clone.querySelectorAll(CLICKABLE_SELECTORS.join(',')).forEach(b => b.remove());
-            const parentText = (clone.textContent || '').trim();
-            if (parentText.length > 5 && parentText.length < 500) {
-                description = parentText;
+            const t = (clone.textContent || '').trim();
+            if (t.length > 5 && t.length < 500) return t;
+        }
+        return container.getAttribute('aria-label') || approveBtn.getAttribute('aria-label') || '';
+    }
+
+    function makeResult(container, found) {
+        const { approveBtn, denyBtn, alwaysAllowBtn } = found;
+        return {
+            approveText: (approveBtn.textContent || '').trim(),
+            alwaysAllowText: alwaysAllowBtn ? (alwaysAllowBtn.textContent || '').trim() : '',
+            denyText: denyBtn ? (denyBtn.textContent || '').trim() : '',
+            description: extractDescription(container, approveBtn),
+        };
+    }
+
+    // ---- TIER 1: .notify-user-container (Antigravity's inline agent panel prompts) ----
+    const notifyContainers = Array.from(document.querySelectorAll('.notify-user-container')).filter(isVisible);
+    for (let i = notifyContainers.length - 1; i >= 0; i--) {
+        const found = findApprovalInContainer(notifyContainers[i]);
+        if (found) return makeResult(notifyContainers[i], found);
+    }
+
+    // ---- TIER 2: modal/dialog containers ----
+    const dialogContainers = Array.from(document.querySelectorAll(
+        '[role="dialog"], [role="alertdialog"], .modal, .dialog, .approval-container, .permission-dialog, [class*="permission"], [class*="approval"]'
+    )).filter(isVisible);
+    for (let i = dialogContainers.length - 1; i >= 0; i--) {
+        const found = findApprovalInContainer(dialogContainers[i]);
+        if (found) return makeResult(dialogContainers[i], found);
+    }
+
+    // ---- TIER 3: global scan — REQUIRES deny button to avoid VS Code false positives ----
+    const allInteractive = Array.from(document.querySelectorAll(CLICKABLE_SELECTORS.join(','))).filter(isVisible);
+    let approveBtn = allInteractive.find(el => ALLOW_ONCE_PATTERNS.some(p => normalize(el.textContent || '').includes(p))) || null;
+    if (!approveBtn) {
+        approveBtn = allInteractive.find(el => {
+            const t = normalize(el.textContent || '');
+            return !ALWAYS_ALLOW_PATTERNS.some(p => t.includes(p)) && ALLOW_PATTERNS.some(p => t.includes(p));
+        }) || null;
+    }
+    if (!approveBtn) return null;
+
+    let container = approveBtn.closest('[role="dialog"], .modal, .dialog, .approval-container, .permission-dialog, [class*="permission"], [class*="approval"]');
+    if (!container) {
+        let el = approveBtn.parentElement;
+        for (let i = 0; i < 8 && el && el !== document.body; i++) {
+            if (Array.from(el.querySelectorAll(CLICKABLE_SELECTORS.join(','))).filter(isVisible)
+                    .some(b => DENY_PATTERNS.some(p => normalize(b.textContent || '').includes(p)))) {
+                container = el; break;
             }
+            el = el.parentElement;
         }
     }
+    if (!container) return null;
 
-    // 3. aria-label on container or approve button
-    if (!description) {
-        description =
-            container.getAttribute('aria-label') ||
-            container.getAttribute('aria-labelledby') && '' || // just reset
-            approveBtn.getAttribute('aria-label') || '';
-    }
-
-    return { approveText, alwaysAllowText, denyText, description };
+    const containerItems = Array.from(container.querySelectorAll(CLICKABLE_SELECTORS.join(','))).filter(isVisible);
+    const denyBtn = containerItems.find(el => DENY_PATTERNS.some(p => normalize(el.textContent || '').includes(p))) || null;
+    if (!denyBtn) return null;
+    const alwaysAllowBtn = containerItems.find(el => ALWAYS_ALLOW_PATTERNS.some(p => normalize(el.textContent || '').includes(p))) || null;
+    return makeResult(container, { approveBtn, denyBtn, alwaysAllowBtn });
 })()`;
 
 /**
@@ -201,7 +175,7 @@ const EXPAND_ALWAYS_ALLOW_MENU_SCRIPT = `(() => {
     ];
 
     const CLICKABLE_SELECTORS = [
-        'button',
+        'button', '[role="button"]',
         '[role="option"]',
         '[role="listitem"]',
         '[role="menuitem"]',
@@ -286,7 +260,7 @@ export function buildClickScript(buttonText: string): string {
         const wanted = normalize(text);
         // Search buttons AND list/option items for the widest compatibility
         const CLICKABLE_SELECTORS = [
-            'button',
+            'button', '[role="button"]',
             '[role="option"]',
             '[role="listitem"]',
             '[role="menuitem"]',
@@ -468,8 +442,12 @@ export class ApprovalDetector {
                 callParams.contextId = contextId;
             }
             const result = await this.cdpService.call('Runtime.evaluate', callParams);
+            if (result?.result?.subtype === 'error') {
+                logger.debug(`[ApprovalDetector] Script error in ctx ${contextId}:`, result.result.description);
+            }
             return result?.result?.value ?? null;
-        } catch {
+        } catch (e) {
+            logger.debug(`[ApprovalDetector] Eval failed in ctx ${contextId}:`, (e as Error)?.message?.slice(0, 80));
             return null;
         }
     }
