@@ -367,6 +367,43 @@ export function ensurePlanningDetector(
             const text = `📄 <b>${chipText}</b> opened in <b>${projectName}</b>\n\n<i>Auto-opened — view in Antigravity editor.</i>`;
             await sendTelegramMessage(bridge.botApi, targetChannel, text);
         },
+        onApprovalRequest: async (info) => {
+            logger.info(`[PlanningDetector:${projectName}] Approval request routed from planning detector`);
+            const approvalDetector = bridge.pool.getApprovalDetector(projectName);
+            const currentChatTitle = await getCurrentChatTitle(cdp);
+            const targetChannel = resolveApprovalChannelForCurrentChat(bridge, projectName, currentChatTitle)
+                ?? bridge.lastActiveChannel;
+
+            if (!targetChannel || !bridge.botApi) {
+                logger.warn(`[PlanningDetector:${projectName}] Approval request skipped — no target channel`);
+                return;
+            }
+
+            const targetChannelStr = targetChannel.threadId ? String(targetChannel.threadId) : String(targetChannel.chatId);
+            let text = `🔔 <b>Approval Required</b>\n\n`;
+            if (info.description) text += `${escapeHtml(info.description)}\n\n`;
+            text += `<b>Approve:</b> ${escapeHtml(info.approveText)}\n`;
+            if (info.alwaysAllowText) text += `<b>Always:</b> ${escapeHtml(info.alwaysAllowText)}\n`;
+            text += `<b>Deny:</b> ${escapeHtml(info.denyText || '(None)')}\n`;
+            text += `<b>Workspace:</b> ${escapeHtml(projectName)}`;
+
+            const approveLabel = info.approveText.replace(/[⌃⌥⇧⏎⌘⌘⌥↵]+/g, '').trim() || 'Allow';
+            const keyboard = new InlineKeyboard()
+                .text(`✅ ${approveLabel}`, buildApprovalCustomId('approve', projectName, targetChannelStr));
+            if (info.alwaysAllowText) {
+                keyboard.text('✅ Allow Chat', buildApprovalCustomId('always_allow', projectName, targetChannelStr));
+            }
+            if (info.denyText) {
+                keyboard.text(`❌ ${info.denyText}`, buildApprovalCustomId('deny', projectName, targetChannelStr));
+            }
+
+            await sendTelegramMessage(bridge.botApi, targetChannel, text, keyboard);
+
+            // Sync the approvalDetector's lastDetectedInfo so /allow and /deny commands work
+            if (approvalDetector) {
+                (approvalDetector as any).lastDetectedInfo = info;
+            }
+        },
     });
 
     detector.start();

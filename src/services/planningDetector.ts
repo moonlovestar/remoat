@@ -33,6 +33,8 @@ export interface PlanningDetectorOptions {
     onResolved?: () => void;
     /** Callback when a read-only artifact (Walkthrough, Task) is auto-opened (no Proceed button) */
     onAutoOpened?: (chipText: string) => void;
+    /** Callback when a permission approval dialog is detected inside a notify-user-container */
+    onApprovalRequest?: (info: import('./approvalDetector').ApprovalInfo) => void;
 }
 
 /**
@@ -86,6 +88,31 @@ const buildDetectPlanningScript = (
      * a Telegram notification (Open-only). These are NOT auto-opened silently.
      */
     const PLAN_TYPE_KEYWORDS = ['implementation plan', 'implementation_plan', 'plan', 'walkthrough', 'task'];
+
+    // Approval-dialog patterns — checked whenever a new notify-user-container is found
+    const ALLOW_ONCE_PATTERNS = ['yes, allow this time', 'yes, allow once', 'allow this time', 'allow once', 'allow one time', '今回のみ許可', '1回のみ許可', '一度許可', '同意授權'];
+    const ALWAYS_ALLOW_PATTERNS = ['yes, and always allow', 'yes, always allow', 'allow this conversation', 'allow this chat', 'always allow', '常に許可', 'この会話を許可'];
+    const ALLOW_PATTERNS = ['yes, allow', 'allow', 'permit', 'run', 'execute', '許可', '承認', '確認', '実行', '同意授權'];
+    const DENY_PATTERNS = ["don't run", "don't allow", "don't", 'no (', 'no,', 'no.', 'no!', 'deny', 'reject', '拒否', 'decline', '却下', 'skip', 'cancel', 'not now', 'dismiss', 'close', 'abort', 'いいえ', 'キャンセル', '拒絕授權', 'other (write your answer)'];
+
+    // Check a DOM scope for allow/deny buttons; returns approval info or null
+    function detectApproval(scope) {
+        const btns = Array.from(scope.querySelectorAll('button, [role="button"]'))
+            .filter(b => b.offsetParent !== null || (b.getBoundingClientRect().width > 0 && b.getBoundingClientRect().height > 0));
+        const norm = (t) => (t || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+        let approveBtn = btns.find(b => ALLOW_ONCE_PATTERNS.some(p => norm(b.textContent).includes(p))) || null;
+        if (!approveBtn) approveBtn = btns.find(b => { const t = norm(b.textContent); return !ALWAYS_ALLOW_PATTERNS.some(p => t.includes(p)) && ALLOW_PATTERNS.some(p => t.includes(p)); }) || null;
+        if (!approveBtn) return null;
+        const denyBtn = btns.find(b => DENY_PATTERNS.some(p => norm(b.textContent).includes(p))) || null;
+        const alwaysAllowBtn = btns.find(b => ALWAYS_ALLOW_PATTERNS.some(p => norm(b.textContent).includes(p))) || null;
+        const titleEl = scope.querySelector('h1, h2, h3, [role="heading"], [class*="title"], [class*="heading"]');
+        const bodyEl = scope.querySelector('p, .description, [class*="body"], [class*="detail"], code');
+        let description = titleEl ? (titleEl.textContent || '').trim() : '';
+        if (description && bodyEl) { const d = (bodyEl.textContent || '').trim(); if (d && d !== description) description += ' — ' + d; }
+        if (!description) { const clone = approveBtn.parentElement?.cloneNode(true); if (clone) { clone.querySelectorAll('button,[role="button"]').forEach(x => x.remove()); const t = (clone.textContent || '').trim(); if (t.length > 5 && t.length < 500) description = t; } }
+        return { isApprovalRequest: true, approveText: (approveBtn.textContent || '').trim(), alwaysAllowText: alwaysAllowBtn ? (alwaysAllowBtn.textContent || '').trim() : '', denyText: denyBtn ? (denyBtn.textContent || '').trim() : '', description };
+    }
+
     const lastClickedText = ${lastClickedText ? JSON.stringify(lastClickedText) : 'null'};
     const BASELINE_NOTIFY = ${baselineNotifyCount};
     const BASELINE_CARD = ${baselineCardCount};
@@ -101,6 +128,10 @@ const buildDetectPlanningScript = (
     let proceedBtn = null;
 
     if (container) {
+        // Check for approval request first — permission dialogs share this container class
+        const approvalResult = detectApproval(container) || (container.parentElement ? detectApproval(container.parentElement) : null);
+        if (approvalResult) return approvalResult;
+
         const allButtons = Array.from(container.querySelectorAll('button')).filter(btn => btn.offsetParent !== null);
         openBtn = allButtons.find(btn => { const t = normalize(btn.textContent); return OPEN_PATTERNS.some(p => t === p || t.includes(p)); });
         proceedBtn = allButtons.find(btn => { const t = normalize(btn.textContent); return PROCEED_PATTERNS.some(p => t === p || t.includes(p)); });
@@ -110,6 +141,10 @@ const buildDetectPlanningScript = (
     if (!openBtn && newContainers.length > 0) {
         for (let ci = newContainers.length - 1; ci >= 0; ci--) {
             const c = newContainers[ci];
+            // Check for approval request before planning detection
+            const approvalResult = detectApproval(c) || (c.parentElement ? detectApproval(c.parentElement) : null);
+            if (approvalResult) return approvalResult;
+
             const btns = Array.from(c.querySelectorAll('button')).filter(btn => btn.offsetParent !== null);
             const ob = btns.find(btn => { const t = normalize(btn.textContent); return OPEN_PATTERNS.some(p => t === p || t.includes(p)); });
             if (ob) {
@@ -415,6 +450,7 @@ export class PlanningDetector {
     private onPlanningRequired: (info: PlanningInfo) => void;
     private onResolved?: () => void;
     private onAutoOpened?: (chipText: string) => void;
+    private onApprovalRequest?: (info: import('./approvalDetector').ApprovalInfo) => void;
 
     private pollTimer: NodeJS.Timeout | null = null;
     private isRunning: boolean = false;
@@ -444,6 +480,7 @@ export class PlanningDetector {
         this.onPlanningRequired = options.onPlanningRequired;
         this.onResolved = options.onResolved;
         this.onAutoOpened = options.onAutoOpened;
+        this.onApprovalRequest = options.onApprovalRequest;
     }
 
     /**
@@ -615,6 +652,18 @@ export class PlanningDetector {
                 if (this.onAutoOpened) {
                     Promise.resolve(this.onAutoOpened(payload.chipText)).catch((err) => {
                         logger.error('[PlanningDetector] onAutoOpened callback failed:', err);
+                    });
+                }
+                return;
+            }
+
+            if (payload && payload.isApprovalRequest) {
+                // Permission dialog detected inside a notify-user-container — route to approval handler
+                this.lastClickedChip = null;
+                logger.info(`[PlanningDetector] Approval request detected: "${payload.approveText}" / "${payload.denyText}"`);
+                if (this.onApprovalRequest) {
+                    Promise.resolve(this.onApprovalRequest(payload)).catch((err) => {
+                        logger.error('[PlanningDetector] onApprovalRequest callback failed:', err);
                     });
                 }
                 return;
