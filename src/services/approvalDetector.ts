@@ -50,13 +50,14 @@ const DETECT_APPROVAL_SCRIPT = `(() => {
         '常に許可',
         'この会話を許可',
     ];
-    const ALLOW_PATTERNS = ['yes, allow', 'allow', 'permit', 'run', 'execute', '許可', '承認', '確認', '実行'];
+    const ALLOW_PATTERNS = ['yes, allow', 'allow', 'permit', 'run', 'execute', '許可', '承認', '確認', '実行', '同意授權'];
     const DENY_PATTERNS = [
         "don't run", "don't allow", "don't",
         'no (', 'no,', 'no.', 'no!',
         'deny', 'reject', '拒否', 'decline', '却下', 'skip',
         'cancel', 'not now', 'dismiss', 'close', 'abort',
         'いいえ', 'キャンセル',
+        '拒絕授權', 'other (write your answer)',
     ];
 
     const normalize = (text) => (text || '').toLowerCase().replace(/\\s+/g, ' ').trim();
@@ -185,6 +186,7 @@ const EXPAND_ALWAYS_ALLOW_MENU_SCRIPT = `(() => {
         '今回のみ許可',
         '1回のみ許可',
         '一度許可',
+        '同意授權',
     ];
     const ALWAYS_ALLOW_PATTERNS = [
         'yes, and always allow',
