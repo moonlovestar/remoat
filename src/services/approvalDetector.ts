@@ -388,6 +388,8 @@ export class ApprovalDetector {
     private lastDetectedInfo: ApprovalInfo | null = null;
     /** Execution context ID where buttons were last found (undefined = not yet discovered) */
     private lastDetectedContextId: number | null | undefined = undefined;
+    /** Whether the one-shot DOM dump has already fired this miss-streak */
+    private domDumpDone: boolean = false;
 
     constructor(options: ApprovalDetectorOptions) {
         this.cdpService = options.cdpService;
@@ -405,6 +407,7 @@ export class ApprovalDetector {
         this.lastDetectedKey = null;
         this.lastDetectedInfo = null;
         this.lastDetectedContextId = undefined;
+        this.domDumpDone = false;
         this.schedulePoll();
     }
 
@@ -457,6 +460,7 @@ export class ApprovalDetector {
                     this.lastDetectedKey = key;
                     this.lastDetectedInfo = info;
                     this.lastDetectedContextId = detected!.contextId;
+                    this.domDumpDone = false;
                     Promise.resolve(this.onApprovalRequired(info)).catch((err) => {
                         logger.error('[ApprovalDetector] onApprovalRequired callback failed:', err);
                     });
@@ -465,6 +469,12 @@ export class ApprovalDetector {
                 // Log every 5th miss so we can confirm the detector is alive
                 if (this.pollCount % 5 === 0) {
                     logger.info(`[ApprovalDetector] poll #${this.pollCount} — no approval dialog found`);
+                }
+                // One-shot DOM dump: fires the first time a poll returns nothing,
+                // and again every 10 polls, so we can see the live DOM structure.
+                if (!this.domDumpDone || this.pollCount % 10 === 0) {
+                    this.domDumpDone = true;
+                    await this.dumpDom();
                 }
                 const wasDetected = this.lastDetectedKey !== null;
                 this.lastDetectedKey = null;
@@ -660,5 +670,58 @@ export class ApprovalDetector {
     /** Returns the CDP service instance this detector is bound to */
     getCdpService(): CdpService {
         return this.cdpService;
+    }
+
+    /**
+     * Dump DOM structure across all contexts for debugging.
+     * Logs visible buttons, allow-once candidate elements, and notify containers.
+     */
+    private async dumpDom(): Promise<void> {
+        const DUMP_SCRIPT = `(() => {
+            const norm = t => (t||'').toLowerCase().replace(/[^\\w\\s,]/g,' ').replace(/\\s+/g,' ').trim();
+            const isVis = el => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
+            const ALLOW_ONCE = ['yes, allow this time','yes, allow once','allow this time','allow once','allow one time','yes, allow'];
+            const SUBMIT_PAT = 'submit';
+
+            const btns = Array.from(document.querySelectorAll('button,[role="button"]'))
+                .filter(isVis)
+                .map(b => ({ tag: b.tagName, text: (b.textContent||'').trim().slice(0,80), norm: norm(b.textContent||''), cls: (b.className||'').slice(0,60) }));
+
+            const allowEls = Array.from(document.querySelectorAll('*')).filter(el => {
+                if (!isVis(el)) return false;
+                if (el.children.length > 12) return false;
+                const t = norm(el.textContent||'');
+                return t.length > 0 && t.length <= 200 && ALLOW_ONCE.some(p => t.includes(p));
+            }).map(el => ({ tag: el.tagName, text: (el.textContent||'').trim().slice(0,100), children: el.children.length, cls: (el.className||'').slice(0,60), parentTag: el.parentElement?.tagName, parentCls: (el.parentElement?.className||'').slice(0,60) }));
+
+            const submitEls = Array.from(document.querySelectorAll('button,[role="button"]'))
+                .filter(isVis)
+                .filter(b => norm(b.textContent||b.getAttribute('aria-label')||'') === SUBMIT_PAT)
+                .map(b => ({ tag: b.tagName, text: (b.textContent||'').trim().slice(0,80), cls: (b.className||'').slice(0,60) }));
+
+            const notifyContainers = Array.from(document.querySelectorAll('.notify-user-container'))
+                .filter(isVis)
+                .map(c => c.outerHTML.slice(0, 800));
+
+            return { url: location.href.slice(0,80), btns, allowEls, submitEls, notifyContainers };
+        })()`;
+
+        const contexts = this.cdpService.getContexts();
+        const allContexts: Array<number | null> = contexts.map(c => c.id);
+        allContexts.push(null); // default context
+
+        for (const ctxId of allContexts) {
+            try {
+                const params: Record<string, unknown> = { expression: DUMP_SCRIPT, returnByValue: true, awaitPromise: false };
+                if (ctxId !== null) params.contextId = ctxId;
+                const res = await this.cdpService.call('Runtime.evaluate', params);
+                const v = res?.result?.value;
+                if (v) {
+                    logger.info(`[ApprovalDetector] DOM_DUMP ctx=${ctxId ?? 'default'} url=${v.url} btns=${JSON.stringify(v.btns)} allowEls=${JSON.stringify(v.allowEls)} submitEls=${JSON.stringify(v.submitEls)} notifyContainers=${JSON.stringify(v.notifyContainers)}`);
+                }
+            } catch (e) {
+                logger.info(`[ApprovalDetector] DOM_DUMP ctx=${ctxId ?? 'default'} eval error: ${(e as Error)?.message?.slice(0,80)}`);
+            }
+        }
     }
 }
