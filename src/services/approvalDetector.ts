@@ -493,9 +493,9 @@ export class ApprovalDetector {
                 if (this.pollCount % 5 === 0) {
                     logger.info(`[ApprovalDetector] poll #${this.pollCount} — no approval dialog found`);
                 }
-                // One-shot DOM dump: fires the first time a poll returns nothing,
-                // and again every 10 polls, so we can see the live DOM structure.
-                if (!this.domDumpDone || this.pollCount % 10 === 0) {
+                // DOM dump: fires once on first miss; repeats every 10 polls only at debug level.
+                const isDumpPoll = !this.domDumpDone || (logger.getLogLevel() === 'debug' && this.pollCount % 10 === 0);
+                if (isDumpPoll) {
                     this.domDumpDone = true;
                     await this.dumpDom();
                 }
@@ -740,10 +740,10 @@ export class ApprovalDetector {
                 const res = await this.cdpService.call('Runtime.evaluate', params);
                 const v = res?.result?.value;
                 if (v) {
-                    logger.info(`[ApprovalDetector] DOM_DUMP ctx=${ctxId ?? 'default'} url=${v.url} btns=${JSON.stringify(v.btns)} allowEls=${JSON.stringify(v.allowEls)} submitEls=${JSON.stringify(v.submitEls)} notifyContainers=${JSON.stringify(v.notifyContainers)}`);
+                    logger.debug(`[ApprovalDetector] DOM_DUMP ctx=${ctxId ?? 'default'} url=${v.url} btns=${JSON.stringify(v.btns)} allowEls=${JSON.stringify(v.allowEls)} submitEls=${JSON.stringify(v.submitEls)} notifyContainers=${JSON.stringify(v.notifyContainers)}`);
                 }
             } catch (e) {
-                logger.info(`[ApprovalDetector] DOM_DUMP ctx=${ctxId ?? 'default'} eval error: ${(e as Error)?.message?.slice(0,80)}`);
+                logger.debug(`[ApprovalDetector] DOM_DUMP ctx=${ctxId ?? 'default'} eval error: ${(e as Error)?.message?.slice(0,80)}`);
             }
         }
     }

@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.15] - 2026-06-04
+
+### Fixed
+- URL permission dialog not forwarded to Telegram (radio-list `<label>/<input type="radio">` DOM)
+  - `findRadioListApproval()` now sorts candidate elements leaf-first so container divs
+    aggregating all option texts no longer win over the correct single-option `<span>`
+  - Removed `[class*="label"]` from title selectors — option `<label>` elements were
+    poisoning the description extraction
+  - `buildClickScript` now detects `<label for="…">` wrappers, sets `radio.checked = true`,
+    dispatches `input`/`change` events, and calls `label.click()` for reliable radio selection
+- Stale approval/planning/error-popup detectors after CDP reconnect — detectors now
+  recreate when a fresh `CdpService` instance is provided (`getCdpService() === cdp` guard)
+- `planningDetector` `detectApproval()` used old normalize that missed `↵`/`✓` in Submit
+  button text; aligned with the same `[^\w\s,]` strip used in `approvalDetector`
+- Expanded chat input selectors (`p[contenteditable]`, `textarea`) for newer Antigravity builds;
+  added diagnostic log when `focusChatInput` fails so the exact element can be identified
+- DOM diagnostic dump downgraded from `info` to `debug` level — only visible with `LOG_LEVEL=debug`
+
 ## [0.2.14] - 2026-04-03
 
 ### Fixed
