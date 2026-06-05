@@ -100,7 +100,7 @@ const buildDetectPlanningScript = (
     // (Antigravity URL/file permission dialogs that use plain div/span option rows + Submit).
     function detectApproval(scope) {
         const isVis = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
-        const norm = (t) => (t || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+        const norm = (t) => (t || '').toLowerCase().replace(/[^\\w\\s,]/g, ' ').replace(/\\s+/g, ' ').trim();
 
         // --- Path A: classic button/role=button scan ---
         const CLICKABLE = 'button, [role="button"], [role="option"], [role="listitem"], [role="menuitem"], li[tabindex], [class*="option"][tabindex], [class*="item"][tabindex]';
@@ -601,6 +601,11 @@ export class PlanningDetector {
     /** Returns whether monitoring is currently active. */
     isActive(): boolean {
         return this.isRunning;
+    }
+
+    /** Returns the CDP service instance this detector is bound to */
+    getCdpService(): CdpService {
+        return this.cdpService;
     }
 
     /**

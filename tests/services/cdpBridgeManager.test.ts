@@ -163,7 +163,7 @@ describe('ensureApprovalDetector', () => {
 
         ensureApprovalDetector(bridge, cdp, 'my-project');
         // Simulate existing active detector
-        const firstDetector = { start: mockStart, isActive: () => true, stop: jest.fn() } as any;
+        const firstDetector = { start: mockStart, isActive: () => true, stop: jest.fn(), getCdpService: () => cdp } as any;
         bridge.pool.registerApprovalDetector('my-project', firstDetector);
 
         ensureApprovalDetector(bridge, cdp, 'my-project');

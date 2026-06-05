@@ -656,4 +656,9 @@ export class ApprovalDetector {
     isActive(): boolean {
         return this.isRunning;
     }
+
+    /** Returns the CDP service instance this detector is bound to */
+    getCdpService(): CdpService {
+        return this.cdpService;
+    }
 }

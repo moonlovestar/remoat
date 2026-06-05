@@ -169,6 +169,11 @@ export class ErrorPopupDetector {
         return this.isRunning;
     }
 
+    /** Returns the CDP service instance this detector is bound to */
+    getCdpService(): CdpService {
+        return this.cdpService;
+    }
+
     /**
      * Click the Dismiss button via CDP.
      * @returns true if click succeeded

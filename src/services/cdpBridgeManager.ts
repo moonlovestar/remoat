@@ -246,7 +246,7 @@ export function ensureApprovalDetector(
     projectName: string,
 ): void {
     const existing = bridge.pool.getApprovalDetector(projectName);
-    if (existing && existing.isActive()) return;
+    if (existing && existing.isActive() && existing.getCdpService() === cdp) return;
 
     let lastMessageId: number | null = null;
     let lastMessageChatId: number | string | null = null;
@@ -321,7 +321,7 @@ export function ensurePlanningDetector(
     projectName: string,
 ): void {
     const existing = bridge.pool.getPlanningDetector(projectName);
-    if (existing && existing.isActive()) return;
+    if (existing && existing.isActive() && existing.getCdpService() === cdp) return;
 
     let lastMessageId: number | null = null;
     let lastMessageChatId: number | string | null = null;
@@ -417,7 +417,7 @@ export function ensureErrorPopupDetector(
     projectName: string,
 ): void {
     const existing = bridge.pool.getErrorPopupDetector(projectName);
-    if (existing && existing.isActive()) return;
+    if (existing && existing.isActive() && existing.getCdpService() === cdp) return;
 
     let lastMessageId: number | null = null;
     let lastMessageChatId: number | string | null = null;
