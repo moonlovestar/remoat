@@ -48,8 +48,14 @@ export interface UiSyncResult {
 
 /** Antigravity UI DOM selector constants */
 const SELECTORS = {
-    /** Chat input box: textbox excluding xterm */
-    CHAT_INPUT: 'div[role="textbox"]:not(.xterm-helper-textarea), div[role="combobox"][contenteditable="true"]',
+    /** Chat input box: textbox excluding xterm, covers various Antigravity versions */
+    CHAT_INPUT: [
+        'div[role="textbox"]:not(.xterm-helper-textarea)',
+        'div[role="combobox"][contenteditable="true"]',
+        'p[contenteditable="true"]',
+        'textarea:not(.xterm-helper-textarea):not([readonly])',
+        '[contenteditable="true"]:not(.xterm-helper-textarea):not(.monaco-editor *)',
+    ].join(', '),
     /** Submit button search target tag */
     SUBMIT_BUTTON_CONTAINER: 'button',
     /** Submit icon SVG class candidates */
@@ -1001,6 +1007,14 @@ export class CdpService extends EventEmitter {
             return { ok: true };
         })()`;
 
+        const diagScript = `(() => {
+            const container = document.querySelector('.antigravity-agent-side-panel') || document.querySelector('#conversation') || document.body;
+            const allEditable = Array.from((container || document.body).querySelectorAll('[contenteditable],[role="textbox"],[role="combobox"],textarea,input[type="text"]'))
+                .filter(el => el.offsetParent !== null)
+                .map(el => ({ tag: el.tagName, role: el.getAttribute('role'), ce: el.getAttribute('contenteditable'), cls: (el.className||'').slice(0,60) }));
+            return { containerTag: (container||document.body).tagName, count: allEditable.length, els: allEditable.slice(0,5) };
+        })()`;
+
         for (const ctx of this.contexts) {
             try {
                 const res = await this.call('Runtime.evaluate', {
@@ -1015,6 +1029,12 @@ export class CdpService extends EventEmitter {
                 // Try next context
             }
         }
+
+        // Log diagnostic info to help identify the new input selector
+        try {
+            const diagRes = await this.call('Runtime.evaluate', { expression: diagScript, returnByValue: true });
+            logger.info(`[CdpService] focusChatInput failed — editable elements: ${JSON.stringify(diagRes?.result?.value)}`);
+        } catch { /* best-effort */ }
 
         return { ok: false, error: 'Chat input field not found' };
     }
@@ -1223,7 +1243,7 @@ export class CdpService extends EventEmitter {
             + '     && text.length < 500;'
             + ' if (isAuthScreen) return { ready: false, reason: \'auth-screen\' };'
             + ' const hasChatInput = !!document.querySelector('
-            + '   \'div[role="textbox"], div[role="combobox"][contenteditable="true"], #conversation\''
+            + '   \'div[role="textbox"], div[role="combobox"][contenteditable="true"], p[contenteditable="true"], #conversation\''
             + ' );'
             + ' return { ready: hasChatInput, reason: hasChatInput ? \'chat-input-found\' : \'no-input-yet\' };'
             + '})()';
