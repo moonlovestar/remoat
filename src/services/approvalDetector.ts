@@ -77,7 +77,7 @@ export const DETECT_APPROVAL_SCRIPT = `(() => {
     }
 
     function extractDescription(container, approveBtn) {
-        const titleEl = container.querySelector('h1, h2, h3, [role="heading"], [class*="title"], [class*="heading"], [class*="label"]');
+        const titleEl = container.querySelector('h1, h2, h3, [role="heading"], [class*="title"], [class*="heading"]');
         const bodyEl = container.querySelector('p, .description, [data-testid="description"], [class*="body"], [class*="detail"], [class*="subtitle"], code');
         if (titleEl) {
             let desc = (titleEl.textContent || '').trim();
@@ -136,11 +136,15 @@ export const DETECT_APPROVAL_SCRIPT = `(() => {
                     continue;
                 }
 
+                // Sort leaf-first so single-text nodes win over containers that aggregate
+                // multiple option texts (e.g. a parent div whose textContent = all options).
                 const elems = Array.from(anc.querySelectorAll('*'))
-                    .filter(el => isVisible(el) && el.children.length <= 8 && (el.textContent || '').length <= 180);
+                    .filter(el => isVisible(el) && el.children.length <= 8 && (el.textContent || '').length <= 180)
+                    .sort((a, b) => a.children.length - b.children.length);
                 const denyEl = elems.find(el => DENY_PATTERNS.some(p => normalize(el.textContent || '').includes(p))) || null;
                 const alwaysEl = elems.find(el => ALWAYS_ALLOW_PATTERNS.some(p => normalize(el.textContent || '').includes(p))) || null;
-                const titleEl = anc.querySelector('h1,h2,h3,[role="heading"],[class*="title"],[class*="heading"],[class*="label"]');
+                // Exclude <label> elements — they belong to the radio options, not the dialog title
+                const titleEl = anc.querySelector('h1,h2,h3,[role="heading"],[class*="title"],[class*="heading"]');
                 const bodyEl = anc.querySelector('p,.description,[data-testid="description"],[class*="body"],[class*="detail"],[class*="subtitle"],code');
                 let description = titleEl ? (titleEl.textContent || '').trim() : '';
                 if (bodyEl) {
@@ -355,6 +359,25 @@ export function buildClickScript(buttonText: string): string {
             target = candidates[0] || null;
         }
         if (!target) return { ok: false, error: 'Element not found: ' + text };
+
+        // If target is inside a <label> that controls a radio/checkbox, activate it properly.
+        // Synthetic click on a <span> inside <label for="id"> doesn't reliably toggle the input,
+        // so we find the associated <input>, set checked, and dispatch change + input events.
+        const labelEl = target.closest('label') || (target.tagName === 'LABEL' ? target : null);
+        if (labelEl) {
+            const forId = labelEl.getAttribute('for');
+            const radio = forId
+                ? document.getElementById(forId)
+                : labelEl.querySelector('input[type="radio"],input[type="checkbox"]');
+            if (radio && (radio.type === 'radio' || radio.type === 'checkbox')) {
+                radio.checked = true;
+                radio.dispatchEvent(new Event('input', { bubbles: true }));
+                radio.dispatchEvent(new Event('change', { bubbles: true }));
+                labelEl.click();
+                return { ok: true };
+            }
+        }
+
         const rect = target.getBoundingClientRect();
         const cx = rect.left + rect.width / 2;
         const cy = rect.top + rect.height / 2;
