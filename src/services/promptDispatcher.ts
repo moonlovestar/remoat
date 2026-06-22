@@ -8,6 +8,7 @@ import { TitleGeneratorService } from './titleGeneratorService';
 import { TelegramTopicManager } from './telegramTopicManager';
 import { ChatSessionService } from './chatSessionService';
 import { InboundImageAttachment } from '../utils/imageHandler';
+import { InboundFileAttachment } from '../utils/fileHandler';
 
 export interface PromptDispatchOptions {
     chatSessionService: ChatSessionService;
@@ -21,6 +22,7 @@ export interface PromptDispatchRequest {
     prompt: string;
     cdp: CdpService;
     inboundImages?: InboundImageAttachment[];
+    inboundFiles?: InboundFileAttachment[];
     options?: PromptDispatchOptions;
 }
 
@@ -37,6 +39,7 @@ export interface PromptDispatcherDeps {
         modelService: ModelService,
         inboundImages?: InboundImageAttachment[],
         options?: PromptDispatchOptions,
+        inboundFiles?: InboundFileAttachment[],
     ) => Promise<void>;
     /** Called after each task completes (success or error). Used for auto-queue fallback. */
     onTaskComplete?: (channel: TelegramChannel, wsKey: string) => void;
@@ -93,6 +96,7 @@ export class PromptDispatcher {
                 this.deps.modelService,
                 req.inboundImages ?? [],
                 req.options,
+                req.inboundFiles ?? [],
             ),
         ).catch(() => { /* errors handled inside sendPromptImpl */ });
 

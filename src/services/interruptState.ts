@@ -12,6 +12,7 @@ import type { TelegramChannel } from './cdpBridgeManager';
 import type { CdpService } from './cdpService';
 import type { PromptDispatchOptions } from './promptDispatcher';
 import type { InboundImageAttachment } from '../utils/imageHandler';
+import type { InboundFileAttachment } from '../utils/fileHandler';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -26,6 +27,8 @@ export interface PendingInterrupt {
     cdp: CdpService;
     /** Images attached to the message */
     inboundImages: InboundImageAttachment[];
+    /** Generic files attached to the message (PDF, CSV, video, audio, etc.) */
+    inboundFiles?: InboundFileAttachment[];
     /** Dispatch options (session service, etc.) */
     options?: PromptDispatchOptions;
     /** Position in queue (1 = first / has keyboard) */

@@ -56,6 +56,11 @@ import {
     isImageAttachment,
     toTelegramInputFile,
 } from '../utils/imageHandler';
+import {
+    buildPromptWithFileRefs,
+    cleanupInboundFileAttachments,
+    downloadTelegramFile,
+} from '../utils/fileHandler';
 import { checkWhisperAvailability, downloadTelegramVoice, transcribeVoice } from '../utils/voiceHandler';
 import { buildModeUI, sendModeUI } from '../ui/modeUi';
 import { buildModelsUI, sendModelsUI } from '../ui/modelsUi';
@@ -173,7 +178,8 @@ async function sendPromptToAntigravity(
         chatSessionRepo: ChatSessionRepository;
         topicManager: TelegramTopicManager;
         titleGenerator: TitleGeneratorService;
-    }
+    },
+    inboundFiles: import('../utils/fileHandler').InboundFileAttachment[] = [],
 ): Promise<void> {
     const api = bridge.botApi!;
     const monitorTraceId = channelKey(channel);
@@ -496,6 +502,12 @@ async function sendPromptToAntigravity(
             if (!injectResult.ok) {
                 await sendEmbed(t('🖼️ Attached image fallback'), t('Failed to attach image directly, resending via URL reference.'));
                 injectResult = await cdp.injectMessage(buildPromptWithAttachmentUrls(prompt, inboundImages));
+            }
+        } else if (inboundFiles.length > 0) {
+            injectResult = await cdp.injectMessageWithFiles(prompt, inboundFiles.map(f => f.localPath));
+            if (!injectResult.ok) {
+                await sendEmbed('📎 Attached file fallback', 'Failed to attach file directly, resending as text reference.');
+                injectResult = await cdp.injectMessage(buildPromptWithFileRefs(prompt, inboundFiles));
             }
         } else {
             injectResult = await cdp.injectMessage(prompt);
@@ -918,6 +930,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                     if (pending.inboundImages?.length) {
                         cleanupInboundImageAttachments(pending.inboundImages).catch(() => {});
                     }
+                    if (pending.inboundFiles?.length) {
+                        cleanupInboundFileAttachments(pending.inboundFiles).catch(() => {});
+                    }
                     continue;
                 }
 
@@ -935,6 +950,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                     prompt: pending.prompt,
                     cdp: freshCdp,
                     inboundImages: pending.inboundImages,
+                    inboundFiles: pending.inboundFiles,
                     options: pending.options,
                 }).catch((e: any) => { logger.error('[autoQueue] dispatch failed:', e); });
             }
@@ -1763,6 +1779,9 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 if (discarded?.inboundImages?.length) {
                     cleanupInboundImageAttachments(discarded.inboundImages).catch(() => {});
                 }
+                if (discarded?.inboundFiles?.length) {
+                    cleanupInboundFileAttachments(discarded.inboundFiles).catch(() => {});
+                }
                 try { await ctx.editMessageText('🗑 Message discarded.'); } catch (e) { logger.debug('[editMsg] Telegram edit failed:', e); }
                 await ctx.answerCallbackQuery({ text: 'Discarded' });
                 return;
@@ -1800,6 +1819,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                     prompt: pending.prompt,
                     cdp: dispatchCdp,
                     inboundImages: pending.inboundImages,
+                    inboundFiles: pending.inboundFiles,
                     options: pending.options,
                 }).catch((e) => { logger.error('[interrupt:now] dispatch failed:', e); });
                 return;
@@ -1815,6 +1835,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 prompt: pending.prompt,
                 cdp: dispatchCdp,
                 inboundImages: pending.inboundImages,
+                inboundFiles: pending.inboundFiles,
                 options: pending.options,
             }).catch((e) => { logger.error('[interrupt:queue] dispatch failed:', e); });
             return;
@@ -2223,6 +2244,170 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             inboundImages: [],
             options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
         }).catch((e) => logger.error('[voiceMsg] dispatch failed:', e));
+    });
+
+    // Document handler — forward any attached file (PDF, CSV, DOCX, etc.) to Antigravity
+    bot.on('message:document', async (ctx) => {
+        const ch = getChannel(ctx);
+        const doc = ctx.message.document;
+        if (!doc) return;
+
+        const caption = ctx.message.caption?.trim() || `Please review the attached file "${doc.file_name || 'file'}" and respond accordingly.`;
+
+        const resolved = await resolveWorkspaceAndCdp(ch);
+        if (!resolved.ok) { await ctx.reply(resolved.message); return; }
+
+        const inboundFiles = await downloadTelegramFile(
+            bot.api,
+            config.telegramBotToken,
+            [{ file_id: doc.file_id, file_size: doc.file_size, file_name: doc.file_name, mime_type: doc.mime_type }],
+            String(ctx.message.message_id),
+        );
+
+        // ── Concurrency gate ────────────────────────────────────────────────
+        const wsKey = promptDispatcher.getWorkspaceKey(ch, resolved.cdp);
+        const interruptKey = safeCallbackKey(wsKey);
+        if (promptDispatcher.isBusy(ch, resolved.cdp) && !consumeBypass(interruptKey)) {
+            const position = addPendingInterrupt(interruptKey, {
+                prompt: caption,
+                channel: ch,
+                cdp: resolved.cdp,
+                inboundImages: [],
+                inboundFiles,
+                options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
+            });
+            if (position === null) {
+                await cleanupInboundFileAttachments(inboundFiles);
+                await ctx.reply(`⚠️ Queue full (${MAX_QUEUE_DEPTH} messages pending). Please wait or /stop the current task.`);
+            } else {
+                await ctx.reply(`📥 Document queued (#${position} in line)`);
+            }
+            return;
+        }
+        // ── End concurrency gate ────────────────────────────────────────────
+
+        promptDispatcher.send({
+            channel: ch,
+            prompt: caption,
+            cdp: resolved.cdp,
+            inboundImages: [],
+            inboundFiles,
+            options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
+        }).catch((e) => logger.error('[docMsg] dispatch failed:', e))
+          .finally(() => cleanupInboundFileAttachments(inboundFiles).catch(() => {}));
+    });
+
+    // Video handler — attach to Antigravity with caption as prompt
+    bot.on('message:video', async (ctx) => {
+        const ch = getChannel(ctx);
+        const video = ctx.message.video;
+        if (!video) return;
+
+        const caption = ctx.message.caption?.trim() || 'A video has been attached. Please summarize or analyze it.';
+
+        const resolved = await resolveWorkspaceAndCdp(ch);
+        if (!resolved.ok) { await ctx.reply(resolved.message); return; }
+
+        const inboundFiles = await downloadTelegramFile(
+            bot.api,
+            config.telegramBotToken,
+            [{ file_id: video.file_id, file_size: video.file_size, mime_type: video.mime_type }],
+            String(ctx.message.message_id),
+        );
+
+        // ── Concurrency gate ────────────────────────────────────────────────
+        const wsKey = promptDispatcher.getWorkspaceKey(ch, resolved.cdp);
+        const interruptKey = safeCallbackKey(wsKey);
+        if (promptDispatcher.isBusy(ch, resolved.cdp) && !consumeBypass(interruptKey)) {
+            const position = addPendingInterrupt(interruptKey, {
+                prompt: caption,
+                channel: ch,
+                cdp: resolved.cdp,
+                inboundImages: [],
+                inboundFiles,
+                options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
+            });
+            if (position === null) {
+                await cleanupInboundFileAttachments(inboundFiles);
+                await ctx.reply(`⚠️ Queue full (${MAX_QUEUE_DEPTH} messages pending). Please wait or /stop the current task.`);
+            } else {
+                await ctx.reply(`📥 Video queued (#${position} in line)`);
+            }
+            return;
+        }
+        // ── End concurrency gate ────────────────────────────────────────────
+
+        promptDispatcher.send({
+            channel: ch,
+            prompt: caption,
+            cdp: resolved.cdp,
+            inboundImages: [],
+            inboundFiles,
+            options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
+        }).catch((e) => logger.error('[videoMsg] dispatch failed:', e))
+          .finally(() => cleanupInboundFileAttachments(inboundFiles).catch(() => {}));
+    });
+
+    // Audio handler — transcribes if Whisper is available, otherwise attaches as file
+    bot.on('message:audio', async (ctx) => {
+        const ch = getChannel(ctx);
+        const audio = ctx.message.audio;
+        if (!audio) return;
+
+        const caption = ctx.message.caption?.trim() || 'An audio file has been attached. Please transcribe or summarize it.';
+
+        const resolved = await resolveWorkspaceAndCdp(ch);
+        if (!resolved.ok) { await ctx.reply(resolved.message); return; }
+
+        // If Whisper is available, transcribe and forward as text
+        const whisperIssue = checkWhisperAvailability();
+        if (!whisperIssue) {
+            await ctx.reply('🎵 Transcribing audio...');
+            try {
+                const voicePath = await downloadTelegramVoice(bot.api, config.telegramBotToken, {
+                    file_id: audio.file_id,
+                    file_unique_id: audio.file_unique_id,
+                    duration: audio.duration,
+                    mime_type: audio.mime_type,
+                    file_size: audio.file_size,
+                });
+                const transcript = await transcribeVoice(voicePath);
+                if (transcript) {
+                    const prompt = caption !== 'An audio file has been attached. Please transcribe or summarize it.'
+                        ? `${caption}\n\n[Audio transcript]: ${transcript}`
+                        : transcript;
+                    await ctx.reply(`📝 "${transcript}"`);
+                    promptDispatcher.send({
+                        channel: ch,
+                        prompt,
+                        cdp: resolved.cdp,
+                        inboundImages: [],
+                        options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
+                    }).catch((e) => logger.error('[audioMsg] dispatch failed:', e));
+                    return;
+                }
+            } catch (e: any) {
+                logger.warn('[audioMsg] Transcription failed, falling back to file attach:', e?.message);
+            }
+        }
+
+        // Fallback: attach as file
+        const inboundFiles = await downloadTelegramFile(
+            bot.api,
+            config.telegramBotToken,
+            [{ file_id: audio.file_id, file_size: audio.file_size, mime_type: audio.mime_type }],
+            String(ctx.message.message_id),
+        );
+
+        promptDispatcher.send({
+            channel: ch,
+            prompt: caption,
+            cdp: resolved.cdp,
+            inboundImages: [],
+            inboundFiles,
+            options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
+        }).catch((e) => logger.error('[audioMsg] dispatch failed:', e))
+          .finally(() => cleanupInboundFileAttachments(inboundFiles).catch(() => {}));
     });
 
     logger.info('Starting Remoat Telegram bot...');

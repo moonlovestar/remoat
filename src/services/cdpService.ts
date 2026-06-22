@@ -1346,6 +1346,40 @@ export class CdpService extends EventEmitter {
         return { ok: true, method: 'enter', contextId: focusResult.contextId };
     }
 
+    /** Like injectMessageWithImageFiles but accepts any file type (PDF, CSV, video, etc.). */
+    async injectMessageWithFiles(text: string, filePaths: string[]): Promise<InjectResult> {
+        if (!this.isConnectedFlag || !this.ws) {
+            throw new Error('Not connected to CDP. Call connect() first.');
+        }
+
+        const uiReady = await this.waitForUiReady();
+        if (!uiReady) {
+            return {
+                ok: false,
+                error: 'Antigravity UI is not ready (still authenticating or loading). Please wait and try again.',
+            };
+        }
+
+        const focusResult = await this.focusChatInput();
+        if (!focusResult.ok) {
+            return { ok: false, error: focusResult.error || 'Chat input field not found' };
+        }
+
+        await this.clearInputField();
+
+        // ponytail: reuse attachImageFiles — it uses DOM.setFileInputFiles which accepts any MIME type
+        const attachResult = await this.attachImageFiles(filePaths, focusResult.contextId);
+        if (!attachResult.ok) {
+            return { ok: false, error: attachResult.error || 'Failed to attach files' };
+        }
+
+        await this.call('Input.insertText', { text });
+        await new Promise(r => setTimeout(r, 200));
+        await this.pressEnterToSend();
+
+        return { ok: true, method: 'enter', contextId: focusResult.contextId };
+    }
+
     /**
      * Extract images from the latest AI response.
      */
