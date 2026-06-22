@@ -1,6 +1,5 @@
 import { Bot, Context, InlineKeyboard, InputFile } from 'grammy';
 import Database from 'better-sqlite3';
-import { unlink } from 'fs/promises';
 
 import { t } from '../utils/i18n';
 import { logger } from '../utils/logger';
@@ -869,13 +868,6 @@ async function sendPromptToAntigravity(
         // Hold the PromptDispatcher lock until the monitor fires onComplete or onTimeout.
         // This prevents a second incoming prompt from injecting while Antigravity is still generating.
         await monitorDone;
-
-        // Delete workspace copies of attached files now that the response is complete
-        if (injectResult?.workspaceCopies?.length) {
-            for (const p of injectResult.workspaceCopies) {
-                unlink(p).catch(() => {});
-            }
-        }
 
     } catch (e: any) {
         isFinalized = true;

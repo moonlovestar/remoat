@@ -29,8 +29,6 @@ export interface InjectResult {
     method?: string;
     contextId?: number;
     error?: string;
-    /** Workspace copies of attached files — caller must delete after response completes. */
-    workspaceCopies?: string[];
 }
 
 export interface ExtractedResponseImage {
@@ -1408,8 +1406,7 @@ export class CdpService extends EventEmitter {
         await new Promise(r => setTimeout(r, 200));
         await this.pressEnterToSend();
 
-        // Return copies so the caller can delete them after the full response completes
-        return { ok: true, method: 'enter', contextId: focusResult.contextId, workspaceCopies };
+        return { ok: true, method: 'enter', contextId: focusResult.contextId };
     }
 
     /**
