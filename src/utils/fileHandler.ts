@@ -56,7 +56,10 @@ export async function downloadTelegramFile(
             const remoteExt = path.extname(filePath);
             const rawName = f.file_name || `file-${index + 1}${remoteExt}`;
             const safeName = rawName.replace(/[^a-zA-Z0-9._-]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '') || `file-${index + 1}`;
-            const localPath = path.join(TEMP_FILE_DIR, `${Date.now()}-${messageId}-${index}-${safeName}`);
+            // Store in a unique subdir so the basename (= safeName) is what Antigravity sees
+            const subdir = path.join(TEMP_FILE_DIR, `${Date.now()}-${messageId}-${index}`);
+            await fs.mkdir(subdir, { recursive: true });
+            const localPath = path.join(subdir, safeName);
 
             await fs.writeFile(localPath, bytes);
             downloaded.push({
@@ -77,5 +80,7 @@ export async function downloadTelegramFile(
 export async function cleanupInboundFileAttachments(files: InboundFileAttachment[]): Promise<void> {
     for (const f of files) {
         await fs.unlink(f.localPath).catch(() => {});
+        // Remove the unique subdir we created
+        await fs.rmdir(path.dirname(f.localPath)).catch(() => {});
     }
 }

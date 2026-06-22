@@ -3,6 +3,8 @@ import { CDP_PORTS } from '../utils/cdpPorts';
 import { EventEmitter } from 'events';
 import * as http from 'http';
 import * as net from 'net';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 import { spawn } from 'child_process';
 import { getAntigravityCliPath, extractProjectNameFromPath } from '../utils/pathUtils';
 import WebSocket from 'ws';
@@ -326,6 +328,10 @@ export class CdpService extends EventEmitter {
      */
     getCurrentWorkspaceName(): string | null {
         return this.currentWorkspaceName;
+    }
+
+    getCurrentWorkspacePath(): string | null {
+        return this.currentWorkspacePath;
     }
 
     /**
@@ -1367,8 +1373,39 @@ export class CdpService extends EventEmitter {
 
         await this.clearInputField();
 
-        // ponytail: reuse attachImageFiles — it uses DOM.setFileInputFiles which accepts any MIME type
-        const attachResult = await this.attachImageFiles(filePaths, focusResult.contextId);
+        // Copy files into the workspace so Claude Code can read them by filename.
+        // DOM.setFileInputFiles gives Antigravity the file content, but Claude Code
+        // also resolves filenames relative to the workspace root — files in /tmp are invisible.
+        const wsPath = this.currentWorkspacePath;
+        const workspaceCopies: string[] = [];
+        const attachPaths: string[] = [];
+
+        for (const src of filePaths) {
+            if (wsPath) {
+                const dest = path.join(wsPath, path.basename(src));
+                try {
+                    await fs.copyFile(src, dest);
+                    workspaceCopies.push(dest);
+                    attachPaths.push(dest);
+                } catch {
+                    attachPaths.push(src); // fallback to original
+                }
+            } else {
+                attachPaths.push(src);
+            }
+        }
+
+        const attachResult = await this.attachImageFiles(attachPaths, focusResult.contextId);
+
+        // Clean up workspace copies after a short delay (give Antigravity time to read them)
+        if (workspaceCopies.length > 0) {
+            setTimeout(() => {
+                for (const p of workspaceCopies) {
+                    fs.unlink(p).catch(() => {});
+                }
+            }, 30_000);
+        }
+
         if (!attachResult.ok) {
             return { ok: false, error: attachResult.error || 'Failed to attach files' };
         }
