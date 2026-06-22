@@ -29,6 +29,8 @@ export interface InjectResult {
     method?: string;
     contextId?: number;
     error?: string;
+    /** Workspace copies of attached files — caller must delete after response completes. */
+    workspaceCopies?: string[];
 }
 
 export interface ExtractedResponseImage {
@@ -1397,16 +1399,8 @@ export class CdpService extends EventEmitter {
 
         const attachResult = await this.attachImageFiles(attachPaths, focusResult.contextId);
 
-        // Clean up workspace copies after a short delay (give Antigravity time to read them)
-        if (workspaceCopies.length > 0) {
-            setTimeout(() => {
-                for (const p of workspaceCopies) {
-                    fs.unlink(p).catch(() => {});
-                }
-            }, 30_000);
-        }
-
         if (!attachResult.ok) {
+            for (const p of workspaceCopies) fs.unlink(p).catch(() => {});
             return { ok: false, error: attachResult.error || 'Failed to attach files' };
         }
 
@@ -1414,7 +1408,8 @@ export class CdpService extends EventEmitter {
         await new Promise(r => setTimeout(r, 200));
         await this.pressEnterToSend();
 
-        return { ok: true, method: 'enter', contextId: focusResult.contextId };
+        // Return copies so the caller can delete them after the full response completes
+        return { ok: true, method: 'enter', contextId: focusResult.contextId, workspaceCopies };
     }
 
     /**
