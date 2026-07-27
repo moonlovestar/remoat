@@ -544,7 +544,44 @@ export class AskQuestionDetector {
             // un-enumerated frame/context' (bodyText has no skip/submit at all).
             const bodyText = normalize((document.body && (document.body.innerText || document.body.textContent)) || '');
             const txt = { hasSkipTxt: bodyText.indexOf('skip') >= 0, hasSubmitTxt: bodyText.indexOf('submit') >= 0, iframes: document.querySelectorAll('iframe, webview').length };
-            return { url: location.href.slice(0, 80), btnLabels: btnLabels, hasSubmit: !!submitBtn, skipFound: skipFound, skipEls: skipEls, approvalGate: approvalGate, cardHtml: cardHtml, txt: txt };
+            // ---- FULL one-shot structural skeleton of the whole card region ----
+            // Class/style/svg-stripped so an entire panel fits in the budget. This
+            // captures question text + ANY option rows + the button row together,
+            // so a single capture is decisive (no back-and-forth). Best-effort.
+            let fullSkeleton = '';
+            try {
+                const skel = (el, depth) => {
+                    if (!el || depth > 8) return '';
+                    const tag = (el.tagName || '').toLowerCase();
+                    if (tag === 'svg' || tag === 'path' || tag === 'style' || tag === 'script') return '';
+                    if (!isVisible(el)) return '';
+                    const role = el.getAttribute && el.getAttribute('role');
+                    const aria = el.getAttribute && el.getAttribute('aria-label');
+                    const ti = el.getAttribute && el.getAttribute('tabindex');
+                    let own = '';
+                    for (const n of Array.from(el.childNodes)) { if (n.nodeType === 3) own += n.textContent; }
+                    own = own.replace(/\\s+/g, ' ').trim().slice(0, 80);
+                    let head = tag;
+                    if (role) head += '[role=' + role + ']';
+                    if (ti !== null && ti !== undefined) head += '[ti=' + ti + ']';
+                    if (aria) head += '[aria=' + aria.slice(0, 40) + ']';
+                    if (own) head += ' "' + own + '"';
+                    let out = head;
+                    const kids = Array.from(el.children).map((c) => skel(c, depth + 1)).filter(Boolean);
+                    if (kids.length) out += '{' + kids.join(',') + '}';
+                    return out;
+                };
+                // Anchor to the Skip/Submit element and climb ~12 levels to reach
+                // the whole agent conversation panel (well above the tiny button row).
+                let fullRoot = submitBtn || (Array.from(document.querySelectorAll('button, [role=\"button\"], a, div, span')).filter(isVisible).find((el) => { const t = normalize(el.textContent || ''); return (t === 'skip' || t.indexOf('skip') >= 0) && t.length <= 40 && el.children.length <= 3; }));
+                if (fullRoot) {
+                    let up = fullRoot;
+                    for (let k = 0; k < 12 && up.parentElement && up.parentElement !== document.body; k++) up = up.parentElement;
+                    fullRoot = up;
+                }
+                fullSkeleton = fullRoot ? skel(fullRoot, 0).slice(0, 15000) : '';
+            } catch (e) { fullSkeleton = 'skeleton-error: ' + (e && e.message ? e.message : String(e)); }
+            return { url: location.href.slice(0, 80), btnLabels: btnLabels, hasSubmit: !!submitBtn, skipFound: skipFound, skipEls: skipEls, approvalGate: approvalGate, cardHtml: cardHtml, txt: txt, fullSkeleton: fullSkeleton };
         })()`;
 
         const contexts = this.cdpService.getContexts();
@@ -554,7 +591,7 @@ export class AskQuestionDetector {
             try {
                 const v = await this.evaluateInContext(DIAG_SCRIPT, ctxId);
                 if (v && (v.hasSubmit || (v.skipEls && v.skipEls.length) || (v.txt && (v.txt.hasSkipTxt || v.txt.hasSubmitTxt)) || (v.btnLabels && v.btnLabels.length))) {
-                    logger.debug(`[AskQuestionDetector] DIAG ctx=${ctxId ?? 'default'} url=${v.url} hasSubmit=${v.hasSubmit} skipFound=${v.skipFound} txt=${JSON.stringify(v.txt)} skipEls=${JSON.stringify(v.skipEls)} approvalGate=${v.approvalGate} btns=${JSON.stringify(v.btnLabels)} cardHtml=${JSON.stringify(v.cardHtml)}`);
+                    logger.debug(`[AskQuestionDetector] DIAG ctx=${ctxId ?? 'default'} url=${v.url} hasSubmit=${v.hasSubmit} skipFound=${v.skipFound} txt=${JSON.stringify(v.txt)} skipEls=${JSON.stringify(v.skipEls)} approvalGate=${v.approvalGate} btns=${JSON.stringify(v.btnLabels)} cardHtml=${JSON.stringify(v.cardHtml)} SKELETON=${JSON.stringify(v.fullSkeleton)}`);
                 }
             } catch (e) {
                 logger.debug(`[AskQuestionDetector] DIAG ctx=${ctxId ?? 'default'} eval error: ${(e as Error)?.message?.slice(0, 80)}`);
