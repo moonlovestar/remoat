@@ -69,49 +69,58 @@ const DETECT_ASK_QUESTION_SCRIPT = `(() => {
             });
             if (hasApprovalOption) return null;
 
-            // ---- Scrape selectable options (if any) so Telegram can show them ----
-            const cleanText = (el) => ((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim());
-            const seen = new Set();
-            const options = [];
-            const pushOpt = (raw) => {
-                let t = (raw || '').replace(/\\s+/g, ' ').trim();
-                if (!t) return;
-                // Strip a leading "1." / "1)" / "1 -" ordinal so labels are clean.
-                t = t.replace(/^\\s*\\d+\\s*[\\.\\)\\-:]\\s*/, '').trim();
-                if (!t || t.length > 200) return;
-                const nt = normalize(t);
-                if (!nt || nt === 'submit' || nt === 'skip') return;
-                if (seen.has(nt)) return;
-                seen.add(nt);
-                options.push(t);
-            };
-
-            // 1) Structured option elements inside the card container.
-            const optEls = Array.from(anc.querySelectorAll(OPTION_SELECTORS))
-                .filter((el) => isVisible(el) && el.children.length <= 8);
-            for (const el of optEls) pushOpt(cleanText(el));
-
-            // 2) Fallback: split container text on ordinal markers ("1.", "2)", ...)
-            //    so each option ends where the next ordinal begins (not at Skip/Submit).
-            if (options.length === 0) {
-                let containerText = cleanText(anc);
-                // Cut off the trailing action-button labels if present.
-                containerText = containerText.replace(/(?:\\s*(?:skip|submit)[^a-zA-Z]*)+$/i, '').trim();
-                const ordinal = /\\s*\\d+\\s*[\\.\\)\\-:]\\s+/g;
-                const parts = [];
-                let lastIdx = -1, mm;
-                while ((mm = ordinal.exec(containerText)) !== null) {
-                    if (lastIdx >= 0) parts.push(containerText.slice(lastIdx, mm.index));
-                    lastIdx = ordinal.lastIndex;
-                }
-                if (lastIdx >= 0) parts.push(containerText.slice(lastIdx));
-                for (const seg of parts) pushOpt(seg);
-            }
-
-            // Diagnostic dump of the card container so we can refine option
-            // scraping from real DOM if the selectors miss (logged once per detect).
+            // ---- Scrape selectable options (best-effort; MUST NOT break detection) ----
+            // Detection drives reply-routing + answer submission, so the whole
+            // scrape+dump is wrapped: any throw yields empty options but still
+            // returns a valid detection result.
+            let options = [];
             let cardDump = '';
-            try { cardDump = (anc.outerHTML || '').slice(0, 1500); } catch (e) { cardDump = 'n/a'; }
+            try {
+                const cleanText = (el) => ((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim());
+                const seen = new Set();
+                const pushOpt = (raw) => {
+                    let t = (raw || '').replace(/\\s+/g, ' ').trim();
+                    if (!t) return;
+                    // Strip a leading "1." / "1)" / "1 -" ordinal so labels are clean.
+                    t = t.replace(/^\\s*\\d+\\s*[\\.\\)\\-:]\\s*/, '').trim();
+                    if (!t || t.length > 200) return;
+                    const nt = normalize(t);
+                    if (!nt || nt === 'submit' || nt === 'skip') return;
+                    if (seen.has(nt)) return;
+                    seen.add(nt);
+                    options.push(t);
+                };
+
+                // 1) Structured option elements inside the card container.
+                const optEls = Array.from(anc.querySelectorAll(OPTION_SELECTORS))
+                    .filter((el) => isVisible(el) && el.children.length <= 8);
+                for (const el of optEls) pushOpt(cleanText(el));
+
+                // 2) Fallback: split container text on ordinal markers ("1.", "2)", ...)
+                //    so each option ends where the next ordinal begins (not at Skip/Submit).
+                if (options.length === 0) {
+                    let containerText = cleanText(anc);
+                    // Cut off the trailing action-button labels if present.
+                    containerText = containerText.replace(/(?:\\s*(?:skip|submit)[^a-zA-Z]*)+$/i, '').trim();
+                    const ordinal = /\\s*\\d+\\s*[\\.\\)\\-:]\\s+/g;
+                    const parts = [];
+                    let lastIdx = -1, mm;
+                    while ((mm = ordinal.exec(containerText)) !== null) {
+                        if (lastIdx >= 0) parts.push(containerText.slice(lastIdx, mm.index));
+                        lastIdx = ordinal.lastIndex;
+                    }
+                    if (lastIdx >= 0) parts.push(containerText.slice(lastIdx));
+                    for (const seg of parts) pushOpt(seg);
+                }
+
+                // Diagnostic dump of the card container so we can refine option
+                // scraping from real DOM if the selectors miss. Bounded small to
+                // keep the Runtime.evaluate return payload serializable.
+                cardDump = (anc.outerHTML || '').slice(0, 800);
+            } catch (scrapeErr) {
+                options = [];
+                cardDump = 'scrape-error: ' + (scrapeErr && scrapeErr.message ? scrapeErr.message : String(scrapeErr));
+            }
 
             return { key: 'ask-question-card', options: options, cardDump: cardDump };
         }
