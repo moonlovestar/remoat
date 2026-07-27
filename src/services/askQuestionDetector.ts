@@ -75,6 +75,25 @@ const DETECT_ASK_QUESTION_SCRIPT = `(() => {
             // returns a valid detection result.
             let options = [];
             let cardDump = '';
+            // The Skip/Submit button row (anc) is a TINY wrapper that holds ONLY
+            // the two buttons; the question text + selectable options render in a
+            // WIDER card root ABOVE it (proven by live cardDump). Climb up from the
+            // button row until the subtree text is substantially larger than just
+            // 'SkipSubmit' (i.e. it now includes the question/options), capped at a
+            // few levels so we never grab the whole panel.
+            let scrapeRoot = anc;
+            try {
+                const btnRowLen = normalize(anc.textContent || '').length;
+                let up = anc.parentElement;
+                for (let j = 0; j < 5 && up && up !== document.body; j++) {
+                    const t = normalize(up.textContent || '');
+                    // Stop once the container carries clearly more text than the
+                    // bare button row (question + options present).
+                    if (t.length > btnRowLen + 12) { scrapeRoot = up; break; }
+                    scrapeRoot = up;
+                    up = up.parentElement;
+                }
+            } catch (rootErr) { scrapeRoot = anc; }
             try {
                 const cleanText = (el) => ((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim());
                 const seen = new Set();
@@ -92,14 +111,14 @@ const DETECT_ASK_QUESTION_SCRIPT = `(() => {
                 };
 
                 // 1) Structured option elements inside the card container.
-                const optEls = Array.from(anc.querySelectorAll(OPTION_SELECTORS))
+                const optEls = Array.from(scrapeRoot.querySelectorAll(OPTION_SELECTORS))
                     .filter((el) => isVisible(el) && el.children.length <= 8);
                 for (const el of optEls) pushOpt(cleanText(el));
 
                 // 2) Fallback: split container text on ordinal markers ("1.", "2)", ...)
                 //    so each option ends where the next ordinal begins (not at Skip/Submit).
                 if (options.length === 0) {
-                    let containerText = cleanText(anc);
+                    let containerText = cleanText(scrapeRoot);
                     // Cut off the trailing action-button labels if present.
                     containerText = containerText.replace(/(?:\\s*(?:skip|submit)[^a-zA-Z]*)+$/i, '').trim();
                     const ordinal = /\\s*\\d+\\s*[\\.\\)\\-:]\\s+/g;
@@ -116,7 +135,7 @@ const DETECT_ASK_QUESTION_SCRIPT = `(() => {
                 // Diagnostic dump of the card container so we can refine option
                 // scraping from real DOM if the selectors miss. Bounded small to
                 // keep the Runtime.evaluate return payload serializable.
-                cardDump = (anc.outerHTML || '').slice(0, 800);
+                cardDump = (scrapeRoot.outerHTML || '').slice(0, 2500);
             } catch (scrapeErr) {
                 options = [];
                 cardDump = 'scrape-error: ' + (scrapeErr && scrapeErr.message ? scrapeErr.message : String(scrapeErr));
