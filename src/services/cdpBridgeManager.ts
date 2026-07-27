@@ -12,6 +12,7 @@ import { PlanningDetector, PlanningInfo } from './planningDetector';
 import { QuotaService } from './quotaService';
 import { UserMessageDetector, UserMessageInfo } from './userMessageDetector';
 import { UnmatchedCaseDetector, UnmatchedCaseInfo } from './unmatchedCaseDetector';
+import { AskQuestionDetector, AskQuestionInfo } from './askQuestionDetector';
 import { buildPlanNotificationUI } from '../ui/planUi';
 
 /** Represents a Telegram chat target: either a chat_id or chat_id + message_thread_id */
@@ -28,6 +29,14 @@ export interface CdpBridge {
     lastActiveChannel: TelegramChannel | null;
     approvalChannelByWorkspace: Map<string, TelegramChannel>;
     approvalChannelBySession: Map<string, TelegramChannel>;
+    /**
+     * Channels currently waiting on an answer to Antigravity's "Asking N question(s)"
+     * Skip/Submit free-text card. Keyed by channelKey(channel) -> projectName.
+     * When set, the bot's message:text handler should route the next reply into the
+     * card's free-text box via AskQuestionDetector.submitAnswer() instead of the
+     * normal chat-input dispatch path.
+     */
+    pendingAskQuestionByChannel: Map<string, string>;
     botApi: Api | null;
     botToken: string;
 }
@@ -204,6 +213,7 @@ export function initCdpBridge(autoApproveDefault: boolean): CdpBridge {
         lastActiveChannel: null,
         approvalChannelByWorkspace: new Map(),
         approvalChannelBySession: new Map(),
+        pendingAskQuestionByChannel: new Map(),
         botApi: null,
         botToken: '',
     };
@@ -546,4 +556,68 @@ export function ensureUnmatchedCaseDetector(
     detector.start();
     bridge.pool.registerUnmatchedCaseDetector(projectName, detector);
     logger.debug(`[UnmatchedCaseDetector:${projectName}] Started`);
+}
+
+/**
+ * Ensure the ask-question detector is running for the workspace.
+ *
+ * Watches for Antigravity's "Asking N question(s)" open-ended free-text card
+ * (Skip + Submit↵ button pair). The question TEXT itself is already relayed
+ * to Telegram via the normal ResponseMonitor completion flow — this detector
+ * only tracks whether the card is currently open so the user's next Telegram
+ * reply gets routed into the card's free-text box + Submit button, instead of
+ * the normal chat-input dispatch path (which is not guaranteed to submit this
+ * specific inline card).
+ */
+export function ensureAskQuestionDetector(
+    bridge: CdpBridge,
+    cdp: CdpService,
+    projectName: string,
+): void {
+    const existing = bridge.pool.getAskQuestionDetector(projectName);
+    if (existing && existing.isActive() && existing.getCdpService() === cdp) return;
+
+    const detector = new AskQuestionDetector({
+        cdpService: cdp,
+        pollIntervalMs: 2000,
+        isOtherDetectorActive: () => {
+            const approval = bridge.pool.getApprovalDetector(projectName);
+            const planning = bridge.pool.getPlanningDetector(projectName);
+            const errorPopup = bridge.pool.getErrorPopupDetector(projectName);
+            return Boolean(
+                approval?.getLastDetectedInfo()
+                || planning?.getLastDetectedInfo()
+                || errorPopup?.getLastDetectedInfo(),
+            );
+        },
+        onQuestionDetected: (_info: AskQuestionInfo) => {
+            logger.info(`[AskQuestionDetector:${projectName}] Open-ended question card detected — routing next reply into its free-text box`);
+
+            const targetChannel = bridge.approvalChannelByWorkspace.get(projectName) ?? bridge.lastActiveChannel;
+            if (!targetChannel) return;
+
+            const key = targetChannel.threadId ? `${targetChannel.chatId}:${targetChannel.threadId}` : String(targetChannel.chatId);
+            bridge.pendingAskQuestionByChannel.set(key, projectName);
+
+            if (bridge.botApi) {
+                sendTelegramMessage(bridge.botApi, targetChannel,
+                    `❓ <b>Open Question</b>\n\nAntigravity is waiting for a free-text answer.\nYour next reply here will be submitted directly into that answer box.\n\n<b>Workspace:</b> ${escapeHtml(projectName)}`)
+                    .catch((e) => logger.error(`[AskQuestionDetector:${projectName}] Failed to send notification:`, e));
+            }
+        },
+        onResolved: () => {
+            // Card closed (answered via IDE directly, skipped, or otherwise). Clear any
+            // pending routing flag for channels bound to this workspace so subsequent
+            // replies fall back to the normal chat-input dispatch path.
+            for (const [key, proj] of bridge.pendingAskQuestionByChannel) {
+                if (proj === projectName) {
+                    bridge.pendingAskQuestionByChannel.delete(key);
+                }
+            }
+        },
+    });
+
+    detector.start();
+    bridge.pool.registerAskQuestionDetector(projectName, detector);
+    logger.debug(`[AskQuestionDetector:${projectName}] Started`);
 }

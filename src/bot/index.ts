@@ -33,6 +33,7 @@ import {
     ensureErrorPopupDetector,
     ensurePlanningDetector,
     ensureUnmatchedCaseDetector,
+    ensureAskQuestionDetector,
     getCurrentCdp,
     initCdpBridge,
     registerApprovalSessionChannel,
@@ -1031,6 +1032,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 ensureErrorPopupDetector(bridge, cdp, projectName);
                 ensurePlanningDetector(bridge, cdp, projectName);
                 ensureUnmatchedCaseDetector(bridge, cdp, projectName);
+                ensureAskQuestionDetector(bridge, cdp, projectName);
             },
         });
 
@@ -1954,6 +1956,32 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 options: { chatSessionService, chatSessionRepo, topicManager, titleGenerator },
             }).catch((e) => logger.error('[planEdit] dispatch failed:', e));
             return;
+        }
+
+        // Ask-question card interception: Antigravity's "Asking N question(s)" open-ended
+        // free-text card (Skip/Submit shape). Route the reply into the card's own free-text
+        // box + Submit button instead of the normal chat-input dispatch path.
+        const pendingAskQuestionProject = bridge.pendingAskQuestionByChannel.get(key);
+        if (pendingAskQuestionProject) {
+            bridge.pendingAskQuestionByChannel.delete(key);
+
+            if (text === '/cancel') {
+                await ctx.reply('Question answer cancelled.');
+                return;
+            }
+
+            const askQuestionDetector = bridge.pool.getAskQuestionDetector(pendingAskQuestionProject);
+            if (!askQuestionDetector) {
+                await ctx.reply('⚠️ No ask-question detector found for this workspace — sending as a normal message instead.');
+            } else {
+                const result = await askQuestionDetector.submitAnswer(text);
+                if (result.ok) {
+                    await ctx.reply('✅ Answer submitted.');
+                    return;
+                }
+                await ctx.reply(`⚠️ Could not submit answer into the question card (${escapeHtml(result.error || 'unknown error')}) — sending as a normal message instead.`);
+            }
+            // Fall through to normal dispatch below as a best-effort fallback.
         }
 
         // Check if it looks like a text command

@@ -8,6 +8,7 @@ import { ErrorPopupDetector } from './errorPopupDetector';
 import { PlanningDetector } from './planningDetector';
 import { UserMessageDetector } from './userMessageDetector';
 import { UnmatchedCaseDetector } from './unmatchedCaseDetector';
+import { AskQuestionDetector } from './askQuestionDetector';
 
 /**
  * Pool that manages independent CdpService instances per workspace.
@@ -28,6 +29,7 @@ export class CdpConnectionPool extends EventEmitter {
     private readonly planningDetectors = new Map<string, PlanningDetector>();
     private readonly userMessageDetectors = new Map<string, UserMessageDetector>();
     private readonly unmatchedCaseDetectors = new Map<string, UnmatchedCaseDetector>();
+    private readonly askQuestionDetectors = new Map<string, AskQuestionDetector>();
     private readonly connectingPromises = new Map<string, Promise<CdpService>>();
     private readonly cdpOptions: CdpServiceOptions;
 
@@ -136,6 +138,12 @@ export class CdpConnectionPool extends EventEmitter {
         if (unmatchedCaseDetector) {
             unmatchedCaseDetector.stop();
             this.unmatchedCaseDetectors.delete(projectName);
+        }
+
+        const askQuestionDetector = this.askQuestionDetectors.get(projectName);
+        if (askQuestionDetector) {
+            askQuestionDetector.stop();
+            this.askQuestionDetectors.delete(projectName);
         }
     }
 
@@ -254,6 +262,24 @@ export class CdpConnectionPool extends EventEmitter {
      */
     getUnmatchedCaseDetector(projectName: string): UnmatchedCaseDetector | undefined {
         return this.unmatchedCaseDetectors.get(projectName);
+    }
+
+    /**
+     * Register the ask-question fallback detector (Skip/Submit free-text card) for a workspace.
+     */
+    registerAskQuestionDetector(projectName: string, detector: AskQuestionDetector): void {
+        const existing = this.askQuestionDetectors.get(projectName);
+        if (existing && existing.isActive()) {
+            existing.stop();
+        }
+        this.askQuestionDetectors.set(projectName, detector);
+    }
+
+    /**
+     * Get the ask-question fallback detector for a workspace.
+     */
+    getAskQuestionDetector(projectName: string): AskQuestionDetector | undefined {
+        return this.askQuestionDetectors.get(projectName);
     }
 
     /**
