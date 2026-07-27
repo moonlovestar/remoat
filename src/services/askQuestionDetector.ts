@@ -297,8 +297,11 @@ export class AskQuestionDetector {
     private async poll(): Promise<void> {
         try {
             if (this.isOtherDetectorActive()) {
+                logger.debug('[AskQuestionDetector] poll skipped: another detector (approval/planning/errorPopup) is active');
                 return;
             }
+
+            await this.dumpDiagnostics();
 
             const detected = await this.detectCard();
 
@@ -444,6 +447,51 @@ export class AskQuestionDetector {
             windowsVirtualKeyCode: 13,
             nativeVirtualKeyCode: 13,
         });
+    }
+
+    /**
+     * Emit a per-context diagnostic of what the detector sees each poll, so we
+     * can tell WHY detection returns null (no submit btn? no skip sibling?
+     * approval-gate tripped?) and inspect the real card HTML. debug-level only.
+     */
+    private async dumpDiagnostics(): Promise<void> {
+        const DIAG_SCRIPT = `(() => {
+            const normalize = (text) => (text || '').toLowerCase().replace(/[^\\w\\s,]/g, ' ').replace(/\\s+/g, ' ').trim();
+            const isVisible = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
+            const btns = Array.from(document.querySelectorAll('button, [role=\"button\"]')).filter(isVisible);
+            const btnLabels = btns.map((b) => normalize(b.textContent || b.getAttribute('aria-label') || '')).filter((t) => t);
+            const submitBtn = btns.find((b) => normalize(b.textContent || '') === 'submit');
+            let skipFound = false, approvalGate = false, cardHtml = '';
+            if (submitBtn) {
+                let anc = submitBtn.parentElement;
+                for (let i = 0; i < 6 && anc && anc !== document.body; i++) {
+                    const skipBtn = Array.from(anc.querySelectorAll('button, [role=\"button\"]')).filter(isVisible).find((b) => normalize(b.textContent || '') === 'skip');
+                    if (skipBtn) {
+                        skipFound = true;
+                        const ALLOW = ['yes, allow this time', 'yes, allow once', 'allow this time', 'allow once', 'allow one time'];
+                        approvalGate = Array.from(anc.querySelectorAll('*')).some((el) => { if (!isVisible(el) || el.children.length > 8) return false; const t = normalize(el.textContent || ''); return t.length > 0 && t.length <= 180 && ALLOW.some((p) => t.includes(p)); });
+                        try { cardHtml = (anc.outerHTML || '').slice(0, 1200); } catch (e) { cardHtml = 'n/a'; }
+                        break;
+                    }
+                    anc = anc.parentElement;
+                }
+            }
+            return { url: location.href.slice(0, 80), btnLabels: btnLabels, hasSubmit: !!submitBtn, skipFound: skipFound, approvalGate: approvalGate, cardHtml: cardHtml };
+        })()`;
+
+        const contexts = this.cdpService.getContexts();
+        const ids: Array<number | null> = contexts.map((c) => c.id);
+        ids.push(null);
+        for (const ctxId of ids) {
+            try {
+                const v = await this.evaluateInContext(DIAG_SCRIPT, ctxId);
+                if (v && (v.hasSubmit || (v.btnLabels && v.btnLabels.length))) {
+                    logger.debug(`[AskQuestionDetector] DIAG ctx=${ctxId ?? 'default'} url=${v.url} hasSubmit=${v.hasSubmit} skipFound=${v.skipFound} approvalGate=${v.approvalGate} btns=${JSON.stringify(v.btnLabels)} cardHtml=${JSON.stringify(v.cardHtml)}`);
+                }
+            } catch (e) {
+                logger.debug(`[AskQuestionDetector] DIAG ctx=${ctxId ?? 'default'} eval error: ${(e as Error)?.message?.slice(0, 80)}`);
+            }
+        }
     }
 
     /**
