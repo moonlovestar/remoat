@@ -11,6 +11,7 @@ import { ErrorPopupDetector, ErrorPopupInfo } from './errorPopupDetector';
 import { PlanningDetector, PlanningInfo } from './planningDetector';
 import { QuotaService } from './quotaService';
 import { UserMessageDetector, UserMessageInfo } from './userMessageDetector';
+import { UnmatchedCaseDetector, UnmatchedCaseInfo } from './unmatchedCaseDetector';
 import { buildPlanNotificationUI } from '../ui/planUi';
 
 /** Represents a Telegram chat target: either a chat_id or chat_id + message_thread_id */
@@ -486,4 +487,63 @@ export function ensureUserMessageDetector(
     detector.start();
     bridge.pool.registerUserMessageDetector(projectName, detector);
     logger.debug(`[UserMessageDetector:${projectName}] Started`);
+}
+
+/**
+ * Ensure a generic "no matching case" fallback detector is running for the workspace.
+ *
+ * This is a DEFAULT / last-resort handler: it only fires when none of the
+ * specific detectors (Approval / Planning / ErrorPopup) currently have an
+ * active detection, and it only reacts to a visible "Other (write your
+ * answer)" style option — regardless of the surrounding dialog shape. This
+ * keeps it generic on purpose, so future unrecognized UI patterns that
+ * expose an "Other" escape hatch are handled automatically instead of
+ * silently stalling the agent.
+ *
+ * On match, it clicks "Other", types the fixed reply
+ * "no handler for this, stop the current function" into the free-text box,
+ * submits it, and notifies the user via Telegram.
+ */
+export function ensureUnmatchedCaseDetector(
+    bridge: CdpBridge,
+    cdp: CdpService,
+    projectName: string,
+): void {
+    const existing = bridge.pool.getUnmatchedCaseDetector(projectName);
+    if (existing && existing.isActive() && existing.getCdpService() === cdp) return;
+
+    const detector = new UnmatchedCaseDetector({
+        cdpService: cdp,
+        pollIntervalMs: 2000,
+        isOtherDetectorActive: () => {
+            const approval = bridge.pool.getApprovalDetector(projectName);
+            const planning = bridge.pool.getPlanningDetector(projectName);
+            const errorPopup = bridge.pool.getErrorPopupDetector(projectName);
+            return Boolean(
+                approval?.getLastDetectedInfo()
+                || planning?.getLastDetectedInfo()
+                || errorPopup?.getLastDetectedInfo(),
+            );
+        },
+        onUnmatchedCaseHandled: async (info: UnmatchedCaseInfo) => {
+            logger.info(`[UnmatchedCaseDetector:${projectName}] No matching case handled — trigger="${info.triggerText}"`);
+
+            const currentChatTitle = await getCurrentChatTitle(cdp);
+            const targetChannel = resolveApprovalChannelForCurrentChat(bridge, projectName, currentChatTitle)
+                ?? bridge.lastActiveChannel;
+
+            if (!targetChannel || !bridge.botApi) return;
+
+            const text = `⚠️ <b>No Matching Case</b>\n\n` +
+                `Detected an unrecognized dialog (option: <i>${escapeHtml(info.triggerText)}</i>).\n` +
+                `Sent fallback reply: <code>${escapeHtml(info.replyText)}</code>\n\n` +
+                `<b>Workspace:</b> ${escapeHtml(projectName)}`;
+
+            await sendTelegramMessage(bridge.botApi, targetChannel, text);
+        },
+    });
+
+    detector.start();
+    bridge.pool.registerUnmatchedCaseDetector(projectName, detector);
+    logger.debug(`[UnmatchedCaseDetector:${projectName}] Started`);
 }

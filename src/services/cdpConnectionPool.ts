@@ -7,6 +7,7 @@ import { ApprovalDetector } from './approvalDetector';
 import { ErrorPopupDetector } from './errorPopupDetector';
 import { PlanningDetector } from './planningDetector';
 import { UserMessageDetector } from './userMessageDetector';
+import { UnmatchedCaseDetector } from './unmatchedCaseDetector';
 
 /**
  * Pool that manages independent CdpService instances per workspace.
@@ -26,6 +27,7 @@ export class CdpConnectionPool extends EventEmitter {
     private readonly errorPopupDetectors = new Map<string, ErrorPopupDetector>();
     private readonly planningDetectors = new Map<string, PlanningDetector>();
     private readonly userMessageDetectors = new Map<string, UserMessageDetector>();
+    private readonly unmatchedCaseDetectors = new Map<string, UnmatchedCaseDetector>();
     private readonly connectingPromises = new Map<string, Promise<CdpService>>();
     private readonly cdpOptions: CdpServiceOptions;
 
@@ -129,6 +131,12 @@ export class CdpConnectionPool extends EventEmitter {
             userMsgDetector.stop();
             this.userMessageDetectors.delete(projectName);
         }
+
+        const unmatchedCaseDetector = this.unmatchedCaseDetectors.get(projectName);
+        if (unmatchedCaseDetector) {
+            unmatchedCaseDetector.stop();
+            this.unmatchedCaseDetectors.delete(projectName);
+        }
     }
 
     /**
@@ -228,6 +236,24 @@ export class CdpConnectionPool extends EventEmitter {
      */
     getUserMessageDetector(projectName: string): UserMessageDetector | undefined {
         return this.userMessageDetectors.get(projectName);
+    }
+
+    /**
+     * Register the generic "no matching case" fallback detector for a workspace.
+     */
+    registerUnmatchedCaseDetector(projectName: string, detector: UnmatchedCaseDetector): void {
+        const existing = this.unmatchedCaseDetectors.get(projectName);
+        if (existing && existing.isActive()) {
+            existing.stop();
+        }
+        this.unmatchedCaseDetectors.set(projectName, detector);
+    }
+
+    /**
+     * Get the generic "no matching case" fallback detector for a workspace.
+     */
+    getUnmatchedCaseDetector(projectName: string): UnmatchedCaseDetector | undefined {
+        return this.unmatchedCaseDetectors.get(projectName);
     }
 
     /**

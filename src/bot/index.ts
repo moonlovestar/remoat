@@ -32,6 +32,7 @@ import {
     ensureApprovalDetector,
     ensureErrorPopupDetector,
     ensurePlanningDetector,
+    ensureUnmatchedCaseDetector,
     getCurrentCdp,
     initCdpBridge,
     registerApprovalSessionChannel,
@@ -1029,6 +1030,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 ensureApprovalDetector(bridge, cdp, projectName);
                 ensureErrorPopupDetector(bridge, cdp, projectName);
                 ensurePlanningDetector(bridge, cdp, projectName);
+                ensureUnmatchedCaseDetector(bridge, cdp, projectName);
             },
         });
 
