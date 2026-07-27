@@ -6,6 +6,8 @@ import { CdpService } from './cdpService';
 export interface AskQuestionInfo {
     /** Dedup key derived from the DOM state at detection time */
     key: string;
+    /** Enumerated selectable options scraped from the card, if any (e.g. ["Apple","Orange","Peach"]). Empty for pure free-text questions. */
+    options: string[];
 }
 
 export interface AskQuestionDetectorOptions {
@@ -42,6 +44,9 @@ const DETECT_ASK_QUESTION_SCRIPT = `(() => {
     const normalize = (text) => (text || '').toLowerCase().replace(/[^\\w\\s,]/g, ' ').replace(/\\s+/g, ' ').trim();
     const isVisible = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
     const CLICKABLE_SELECTORS = 'button, [role="button"]';
+    // Option-row selectors: same proven set ApprovalDetector uses for the
+    // radio-list UI, since Antigravity renders selectable options this way.
+    const OPTION_SELECTORS = '[role="option"], [role="listitem"], [role="menuitem"], [role="radio"], li[tabindex], [class*="option"][tabindex], [class*="item"][tabindex], [class*="choice"]';
 
     const btns = Array.from(document.querySelectorAll(CLICKABLE_SELECTORS)).filter(isVisible);
     const submitBtn = btns.find((b) => normalize(b.textContent || '') === 'submit');
@@ -63,7 +68,52 @@ const DETECT_ASK_QUESTION_SCRIPT = `(() => {
                 return t.length > 0 && t.length <= 180 && ALLOW_ONCE_PATTERNS.some((p) => t.includes(p));
             });
             if (hasApprovalOption) return null;
-            return { key: 'ask-question-card' };
+
+            // ---- Scrape selectable options (if any) so Telegram can show them ----
+            const cleanText = (el) => ((el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim());
+            const seen = new Set();
+            const options = [];
+            const pushOpt = (raw) => {
+                let t = (raw || '').replace(/\\s+/g, ' ').trim();
+                if (!t) return;
+                // Strip a leading "1." / "1)" / "1 -" ordinal so labels are clean.
+                t = t.replace(/^\\s*\\d+\\s*[\\.\\)\\-:]\\s*/, '').trim();
+                if (!t || t.length > 200) return;
+                const nt = normalize(t);
+                if (!nt || nt === 'submit' || nt === 'skip') return;
+                if (seen.has(nt)) return;
+                seen.add(nt);
+                options.push(t);
+            };
+
+            // 1) Structured option elements inside the card container.
+            const optEls = Array.from(anc.querySelectorAll(OPTION_SELECTORS))
+                .filter((el) => isVisible(el) && el.children.length <= 8);
+            for (const el of optEls) pushOpt(cleanText(el));
+
+            // 2) Fallback: split container text on ordinal markers ("1.", "2)", ...)
+            //    so each option ends where the next ordinal begins (not at Skip/Submit).
+            if (options.length === 0) {
+                let containerText = cleanText(anc);
+                // Cut off the trailing action-button labels if present.
+                containerText = containerText.replace(/(?:\\s*(?:skip|submit)[^a-zA-Z]*)+$/i, '').trim();
+                const ordinal = /\\s*\\d+\\s*[\\.\\)\\-:]\\s+/g;
+                const parts = [];
+                let lastIdx = -1, mm;
+                while ((mm = ordinal.exec(containerText)) !== null) {
+                    if (lastIdx >= 0) parts.push(containerText.slice(lastIdx, mm.index));
+                    lastIdx = ordinal.lastIndex;
+                }
+                if (lastIdx >= 0) parts.push(containerText.slice(lastIdx));
+                for (const seg of parts) pushOpt(seg);
+            }
+
+            // Diagnostic dump of the card container so we can refine option
+            // scraping from real DOM if the selectors miss (logged once per detect).
+            let cardDump = '';
+            try { cardDump = (anc.outerHTML || '').slice(0, 1500); } catch (e) { cardDump = 'n/a'; }
+
+            return { key: 'ask-question-card', options: options, cardDump: cardDump };
         }
         anc = anc.parentElement;
     }
@@ -180,6 +230,9 @@ export class AskQuestionDetector {
      */
     private lastDetectedContextId: number | null | undefined = undefined;
 
+    /** Options scraped from the card at last detection, for numeric-index → label mapping. */
+    private lastOptions: string[] = [];
+
     constructor(options: AskQuestionDetectorOptions) {
         this.cdpService = options.cdpService;
         this.pollIntervalMs = options.pollIntervalMs ?? 2000;
@@ -194,6 +247,7 @@ export class AskQuestionDetector {
         this.isRunning = true;
         this.cardActive = false;
         this.lastDetectedContextId = undefined;
+        this.lastOptions = [];
         this.schedulePoll();
     }
 
@@ -242,10 +296,12 @@ export class AskQuestionDetector {
             if (detected && !this.cardActive) {
                 this.cardActive = true;
                 this.lastDetectedContextId = detected.contextId;
-                this.onQuestionDetected({ key: detected.key });
+                this.lastOptions = detected.options;
+                this.onQuestionDetected({ key: detected.key, options: detected.options });
             } else if (!detected && this.cardActive) {
                 this.cardActive = false;
                 this.lastDetectedContextId = undefined;
+                this.lastOptions = [];
                 this.onResolved?.();
             }
         } catch (error) {
@@ -264,11 +320,11 @@ export class AskQuestionDetector {
      * ApprovalDetector's full-scan strategy: try the cached context first, then
      * every reported context, then the default context.
      */
-    private async detectCard(): Promise<{ key: string; contextId: number | null | undefined } | null> {
+    private async detectCard(): Promise<{ key: string; options: string[]; contextId: number | null | undefined } | null> {
         // Fast path: re-use the context where the card was last found
         if (this.lastDetectedContextId !== undefined) {
             const info = await this.evaluateInContext(DETECT_ASK_QUESTION_SCRIPT, this.lastDetectedContextId);
-            if (info) return { key: info.key, contextId: this.lastDetectedContextId };
+            if (info) return { key: info.key, options: Array.isArray(info.options) ? info.options : [], contextId: this.lastDetectedContextId };
         }
 
         // Full scan: try every execution context reported by the CDP connection
@@ -278,7 +334,7 @@ export class AskQuestionDetector {
             const info = await this.evaluateInContext(DETECT_ASK_QUESTION_SCRIPT, ctx.id);
             if (info) {
                 logger.info(`[AskQuestionDetector] SCRIPT HIT ctx ${ctx.id}: ${JSON.stringify(info)}`);
-                return { key: info.key, contextId: ctx.id };
+                return { key: info.key, options: Array.isArray(info.options) ? info.options : [], contextId: ctx.id };
             }
         }
 
@@ -287,7 +343,7 @@ export class AskQuestionDetector {
             const info = await this.evaluateInContext(DETECT_ASK_QUESTION_SCRIPT, null);
             if (info) {
                 logger.info(`[AskQuestionDetector] SCRIPT HIT ctx default: ${JSON.stringify(info)}`);
-                return { key: info.key, contextId: null };
+                return { key: info.key, options: Array.isArray(info.options) ? info.options : [], contextId: null };
             }
         }
 
@@ -306,6 +362,22 @@ export class AskQuestionDetector {
             return { ok: false, error: 'Ask-question card context not known (card may have closed)' };
         }
 
+        // If the user replied with a bare option number (e.g. "1") and we scraped
+        // options at detection, inject the option's LABEL instead of the digit.
+        // Antigravity interprets a bare digit inconsistently (observed "1" selecting
+        // the wrong option), whereas the exact label text lands reliably as free text.
+        let answer = text;
+        const trimmed = text.trim();
+        if (/^\d+$/.test(trimmed) && this.lastOptions.length > 0) {
+            const idx = parseInt(trimmed, 10) - 1; // options are presented 1-based
+            if (idx >= 0 && idx < this.lastOptions.length) {
+                answer = this.lastOptions[idx];
+                logger.info(`[AskQuestionDetector] Mapped numeric reply "${trimmed}" -> option "${answer}"`);
+            } else {
+                logger.info(`[AskQuestionDetector] Numeric reply "${trimmed}" out of range (1..${this.lastOptions.length}); sending as-is`);
+            }
+        }
+
         const focused = await this.evaluateInContext(FOCUS_FREE_TEXT_INPUT_SCRIPT, contextId);
         if (focused?.ok !== true) {
             return { ok: false, error: focused?.error || 'Failed to focus free-text input' };
@@ -314,14 +386,14 @@ export class AskQuestionDetector {
 
         // Primary path: set the value via the native setter + input/change events so
         // React registers it, then read the box's value back to VERIFY it landed.
-        const setRes = await this.evaluateInContext(buildSetAndReadScript(text), contextId);
+        const setRes = await this.evaluateInContext(buildSetAndReadScript(answer), contextId);
         let landed = setRes?.ok === true && typeof setRes.value === 'string' && setRes.value.length > 0;
         logger.info(`[AskQuestionDetector] set-and-read result: ${JSON.stringify(setRes)} (landed=${landed})`);
 
         // Fallback: if the JS setter didn't take, try the CDP keystroke path into
         // the (still-focused) box, then re-read to confirm.
         if (!landed) {
-            await this.cdpService.call('Input.insertText', { text });
+            await this.cdpService.call('Input.insertText', { text: answer });
             await new Promise((resolve) => setTimeout(resolve, 150));
             const readRes = await this.evaluateInContext(
                 `(() => { const b = window.__remoatAskBox; if (!b) return { ok:false }; return { ok:true, value: (b.value !== undefined ? b.value : (b.innerText || b.textContent || '')) }; })()`,

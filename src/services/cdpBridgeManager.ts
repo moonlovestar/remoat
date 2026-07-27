@@ -590,7 +590,7 @@ export function ensureAskQuestionDetector(
                 || errorPopup?.getLastDetectedInfo(),
             );
         },
-        onQuestionDetected: (_info: AskQuestionInfo) => {
+        onQuestionDetected: (info: AskQuestionInfo) => {
             logger.info(`[AskQuestionDetector:${projectName}] Open-ended question card detected — routing next reply into its free-text box`);
 
             const targetChannel = bridge.approvalChannelByWorkspace.get(projectName) ?? bridge.lastActiveChannel;
@@ -600,8 +600,20 @@ export function ensureAskQuestionDetector(
             bridge.pendingAskQuestionByChannel.set(key, projectName);
 
             if (bridge.botApi) {
-                sendTelegramMessage(bridge.botApi, targetChannel,
-                    `❓ <b>Open Question</b>\n\nAntigravity is waiting for a free-text answer.\nYour next reply here will be submitted directly into that answer box.\n\n<b>Workspace:</b> ${escapeHtml(projectName)}`)
+                const options = Array.isArray(info.options) ? info.options : [];
+                let body =
+                    `❓ <b>Open Question</b>\n\nAntigravity is waiting for an answer.\n`;
+                if (options.length > 0) {
+                    const list = options.map((opt, i) => `${i + 1}. ${escapeHtml(opt)}`).join('\n');
+                    body +=
+                        `\n<b>Options:</b>\n${list}\n\n` +
+                        `Reply with the option <b>number</b> (e.g. <code>1</code>) or type your own answer — either will be submitted into the card.\n`;
+                } else {
+                    body += `Your next reply here will be submitted directly into that answer box.\n`;
+                }
+                body += `\n<b>Workspace:</b> ${escapeHtml(projectName)}`;
+
+                sendTelegramMessage(bridge.botApi, targetChannel, body)
                     .catch((e) => logger.error(`[AskQuestionDetector:${projectName}] Failed to send notification:`, e));
             }
         },
