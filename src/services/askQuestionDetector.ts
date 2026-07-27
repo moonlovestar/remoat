@@ -460,23 +460,42 @@ export class AskQuestionDetector {
             const isVisible = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
             const btns = Array.from(document.querySelectorAll('button, [role=\"button\"]')).filter(isVisible);
             const btnLabels = btns.map((b) => normalize(b.textContent || b.getAttribute('aria-label') || '')).filter((t) => t);
-            const submitBtn = btns.find((b) => normalize(b.textContent || '') === 'submit');
+            // Exact + substring-tolerant, in case this build labels the action
+            // button differently (no trailing glyph, 'Send', a div, etc.).
+            const submitBtn = btns.find((b) => normalize(b.textContent || '') === 'submit')
+                || btns.find((b) => { const t = normalize(b.textContent || b.getAttribute('aria-label') || ''); return t === 'submit' || t.indexOf('submit') >= 0 || t === 'send' || t.indexOf('send answer') >= 0; });
+            // Any element whose text is exactly/contains 'skip' — the card's tell.
+            const skipEls = Array.from(document.querySelectorAll('button, [role=\"button\"], a, div, span'))
+                .filter(isVisible)
+                .filter((el) => { const t = normalize(el.textContent || ''); return (t === 'skip' || t.indexOf('skip') >= 0) && t.length <= 40 && el.children.length <= 3; })
+                .slice(0, 4)
+                .map((el) => ({ tag: el.tagName, text: (el.textContent || '').trim().slice(0, 40), cls: (el.className || '').toString().slice(0, 60) }));
             let skipFound = false, approvalGate = false, cardHtml = '';
             if (submitBtn) {
                 let anc = submitBtn.parentElement;
                 for (let i = 0; i < 6 && anc && anc !== document.body; i++) {
-                    const skipBtn = Array.from(anc.querySelectorAll('button, [role=\"button\"]')).filter(isVisible).find((b) => normalize(b.textContent || '') === 'skip');
+                    const skipBtn = Array.from(anc.querySelectorAll('button, [role=\"button\"], a, div, span')).filter(isVisible).find((b) => { const t = normalize(b.textContent || ''); return (t === 'skip' || t.indexOf('skip') >= 0) && t.length <= 40; });
                     if (skipBtn) {
                         skipFound = true;
                         const ALLOW = ['yes, allow this time', 'yes, allow once', 'allow this time', 'allow once', 'allow one time'];
                         approvalGate = Array.from(anc.querySelectorAll('*')).some((el) => { if (!isVisible(el) || el.children.length > 8) return false; const t = normalize(el.textContent || ''); return t.length > 0 && t.length <= 180 && ALLOW.some((p) => t.includes(p)); });
-                        try { cardHtml = (anc.outerHTML || '').slice(0, 1200); } catch (e) { cardHtml = 'n/a'; }
+                        try { cardHtml = (anc.outerHTML || '').slice(0, 1500); } catch (e) { cardHtml = 'n/a'; }
                         break;
                     }
                     anc = anc.parentElement;
                 }
             }
-            return { url: location.href.slice(0, 80), btnLabels: btnLabels, hasSubmit: !!submitBtn, skipFound: skipFound, approvalGate: approvalGate, cardHtml: cardHtml };
+            // If a skip element exists but no submit matched, still dump the skip's
+            // container so we can see how THIS build names the action button.
+            if (!cardHtml && skipEls.length) {
+                try {
+                    const ske = Array.from(document.querySelectorAll('button, [role=\"button\"], a, div, span')).filter(isVisible).find((el) => { const t = normalize(el.textContent || ''); return (t === 'skip' || t.indexOf('skip') >= 0) && t.length <= 40 && el.children.length <= 3; });
+                    let a = ske && ske.parentElement;
+                    for (let i = 0; i < 4 && a && a !== document.body; i++) a = a.parentElement;
+                    if (a) cardHtml = (a.outerHTML || '').slice(0, 1500);
+                } catch (e) { cardHtml = 'skip-dump-error'; }
+            }
+            return { url: location.href.slice(0, 80), btnLabels: btnLabels, hasSubmit: !!submitBtn, skipFound: skipFound, skipEls: skipEls, approvalGate: approvalGate, cardHtml: cardHtml };
         })()`;
 
         const contexts = this.cdpService.getContexts();
@@ -485,8 +504,8 @@ export class AskQuestionDetector {
         for (const ctxId of ids) {
             try {
                 const v = await this.evaluateInContext(DIAG_SCRIPT, ctxId);
-                if (v && (v.hasSubmit || (v.btnLabels && v.btnLabels.length))) {
-                    logger.debug(`[AskQuestionDetector] DIAG ctx=${ctxId ?? 'default'} url=${v.url} hasSubmit=${v.hasSubmit} skipFound=${v.skipFound} approvalGate=${v.approvalGate} btns=${JSON.stringify(v.btnLabels)} cardHtml=${JSON.stringify(v.cardHtml)}`);
+                if (v && (v.hasSubmit || (v.skipEls && v.skipEls.length) || (v.btnLabels && v.btnLabels.length))) {
+                    logger.debug(`[AskQuestionDetector] DIAG ctx=${ctxId ?? 'default'} url=${v.url} hasSubmit=${v.hasSubmit} skipFound=${v.skipFound} skipEls=${JSON.stringify(v.skipEls)} approvalGate=${v.approvalGate} btns=${JSON.stringify(v.btnLabels)} cardHtml=${JSON.stringify(v.cardHtml)}`);
                 }
             } catch (e) {
                 logger.debug(`[AskQuestionDetector] DIAG ctx=${ctxId ?? 'default'} eval error: ${(e as Error)?.message?.slice(0, 80)}`);
