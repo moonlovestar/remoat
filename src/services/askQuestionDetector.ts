@@ -495,7 +495,12 @@ export class AskQuestionDetector {
                     if (a) cardHtml = (a.outerHTML || '').slice(0, 1500);
                 } catch (e) { cardHtml = 'skip-dump-error'; }
             }
-            return { url: location.href.slice(0, 80), btnLabels: btnLabels, hasSubmit: !!submitBtn, skipFound: skipFound, skipEls: skipEls, approvalGate: approvalGate, cardHtml: cardHtml };
+            // Presence probe: is the card's text even reachable in THIS context?
+            // Distinguishes 'wrong button label' from 'card lives in an
+            // un-enumerated frame/context' (bodyText has no skip/submit at all).
+            const bodyText = normalize((document.body && (document.body.innerText || document.body.textContent)) || '');
+            const txt = { hasSkipTxt: bodyText.indexOf('skip') >= 0, hasSubmitTxt: bodyText.indexOf('submit') >= 0, iframes: document.querySelectorAll('iframe, webview').length };
+            return { url: location.href.slice(0, 80), btnLabels: btnLabels, hasSubmit: !!submitBtn, skipFound: skipFound, skipEls: skipEls, approvalGate: approvalGate, cardHtml: cardHtml, txt: txt };
         })()`;
 
         const contexts = this.cdpService.getContexts();
@@ -504,8 +509,8 @@ export class AskQuestionDetector {
         for (const ctxId of ids) {
             try {
                 const v = await this.evaluateInContext(DIAG_SCRIPT, ctxId);
-                if (v && (v.hasSubmit || (v.skipEls && v.skipEls.length) || (v.btnLabels && v.btnLabels.length))) {
-                    logger.debug(`[AskQuestionDetector] DIAG ctx=${ctxId ?? 'default'} url=${v.url} hasSubmit=${v.hasSubmit} skipFound=${v.skipFound} skipEls=${JSON.stringify(v.skipEls)} approvalGate=${v.approvalGate} btns=${JSON.stringify(v.btnLabels)} cardHtml=${JSON.stringify(v.cardHtml)}`);
+                if (v && (v.hasSubmit || (v.skipEls && v.skipEls.length) || (v.txt && (v.txt.hasSkipTxt || v.txt.hasSubmitTxt)) || (v.btnLabels && v.btnLabels.length))) {
+                    logger.debug(`[AskQuestionDetector] DIAG ctx=${ctxId ?? 'default'} url=${v.url} hasSubmit=${v.hasSubmit} skipFound=${v.skipFound} txt=${JSON.stringify(v.txt)} skipEls=${JSON.stringify(v.skipEls)} approvalGate=${v.approvalGate} btns=${JSON.stringify(v.btnLabels)} cardHtml=${JSON.stringify(v.cardHtml)}`);
                 }
             } catch (e) {
                 logger.debug(`[AskQuestionDetector] DIAG ctx=${ctxId ?? 'default'} eval error: ${(e as Error)?.message?.slice(0, 80)}`);
