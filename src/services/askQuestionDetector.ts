@@ -111,6 +111,14 @@ export class AskQuestionDetector {
     private isRunning: boolean = false;
     /** True while the Skip/Submit card was present on the last poll */
     private cardActive: boolean = false;
+    /**
+     * Execution context where the card was last detected. The Skip/Submit card
+     * renders in a webview-frame context (e.g. ctx=1/ctx=2 in DOM_DUMP logs),
+     * NOT necessarily the primary/cascade-panel context — so we must scan all
+     * contexts and remember which one hit, like ApprovalDetector does.
+     * undefined = not yet detected; null = detected in the default context.
+     */
+    private lastDetectedContextId: number | null | undefined = undefined;
 
     constructor(options: AskQuestionDetectorOptions) {
         this.cdpService = options.cdpService;
@@ -125,6 +133,7 @@ export class AskQuestionDetector {
         if (this.isRunning) return;
         this.isRunning = true;
         this.cardActive = false;
+        this.lastDetectedContextId = undefined;
         this.schedulePoll();
     }
 
@@ -168,13 +177,15 @@ export class AskQuestionDetector {
                 return;
             }
 
-            const found = await this.runEvaluateScript(DETECT_ASK_QUESTION_SCRIPT);
+            const detected = await this.detectCard();
 
-            if (found && !this.cardActive) {
+            if (detected && !this.cardActive) {
                 this.cardActive = true;
-                this.onQuestionDetected({ key: found.key });
-            } else if (!found && this.cardActive) {
+                this.lastDetectedContextId = detected.contextId;
+                this.onQuestionDetected({ key: detected.key });
+            } else if (!detected && this.cardActive) {
                 this.cardActive = false;
+                this.lastDetectedContextId = undefined;
                 this.onResolved?.();
             }
         } catch (error) {
@@ -187,11 +198,55 @@ export class AskQuestionDetector {
     }
 
     /**
+     * Scan all CDP execution contexts for the Skip/Submit question card.
+     * The card renders in a webview-frame context (ctx=1/ctx=2 in DOM_DUMP logs),
+     * NOT necessarily the primary/cascade-panel context — so mirror
+     * ApprovalDetector's full-scan strategy: try the cached context first, then
+     * every reported context, then the default context.
+     */
+    private async detectCard(): Promise<{ key: string; contextId: number | null | undefined } | null> {
+        // Fast path: re-use the context where the card was last found
+        if (this.lastDetectedContextId !== undefined) {
+            const info = await this.evaluateInContext(DETECT_ASK_QUESTION_SCRIPT, this.lastDetectedContextId);
+            if (info) return { key: info.key, contextId: this.lastDetectedContextId };
+        }
+
+        // Full scan: try every execution context reported by the CDP connection
+        const contexts = this.cdpService.getContexts();
+        for (const ctx of contexts) {
+            if (ctx.id === this.lastDetectedContextId) continue;
+            const info = await this.evaluateInContext(DETECT_ASK_QUESTION_SCRIPT, ctx.id);
+            if (info) {
+                logger.info(`[AskQuestionDetector] SCRIPT HIT ctx ${ctx.id}: ${JSON.stringify(info)}`);
+                return { key: info.key, contextId: ctx.id };
+            }
+        }
+
+        // Final fallback: default context (no contextId param)
+        if (this.lastDetectedContextId !== null) {
+            const info = await this.evaluateInContext(DETECT_ASK_QUESTION_SCRIPT, null);
+            if (info) {
+                logger.info(`[AskQuestionDetector] SCRIPT HIT ctx default: ${JSON.stringify(info)}`);
+                return { key: info.key, contextId: null };
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Type the given answer into the question card's free-text box and click Submit.
      * Falls back to Enter if no Submit button is found (card may have already closed).
+     * Uses the context where the card was last detected so the text lands in the
+     * correct webview frame.
      */
     async submitAnswer(text: string): Promise<{ ok: boolean; error?: string }> {
-        const focused = await this.runEvaluateScript(FOCUS_FREE_TEXT_INPUT_SCRIPT);
+        const contextId = this.lastDetectedContextId;
+        if (contextId === undefined) {
+            return { ok: false, error: 'Ask-question card context not known (card may have closed)' };
+        }
+
+        const focused = await this.evaluateInContext(FOCUS_FREE_TEXT_INPUT_SCRIPT, contextId);
         if (focused?.ok !== true) {
             return { ok: false, error: focused?.error || 'Failed to focus free-text input' };
         }
@@ -199,12 +254,13 @@ export class AskQuestionDetector {
         await this.cdpService.call('Input.insertText', { text });
         await new Promise((resolve) => setTimeout(resolve, 150));
 
-        const submitClicked = await this.runEvaluateScript(buildClickScript('Submit'));
+        const submitClicked = await this.evaluateInContext(buildClickScript('Submit'), contextId);
         if (submitClicked?.ok !== true) {
             await this.pressEnter();
         }
 
         this.cardActive = false;
+        this.lastDetectedContextId = undefined;
         return { ok: true };
     }
 
@@ -225,18 +281,23 @@ export class AskQuestionDetector {
         });
     }
 
-    /** Execute Runtime.evaluate with the primary context and return result.value. */
-    private async runEvaluateScript(expression: string): Promise<any> {
-        const contextId = this.cdpService.getPrimaryContextId();
+    /**
+     * Execute Runtime.evaluate in a specific context and return result.value.
+     * contextId undefined/null → evaluate in the default context (no contextId param).
+     */
+    private async evaluateInContext(expression: string, contextId: number | null | undefined): Promise<any> {
         const callParams: Record<string, unknown> = {
             expression,
             returnByValue: true,
             awaitPromise: false,
         };
-        if (contextId !== null) {
+        if (contextId !== null && contextId !== undefined) {
             callParams.contextId = contextId;
         }
         const result = await this.cdpService.call('Runtime.evaluate', callParams);
+        if (result?.result?.subtype === 'error') {
+            return null;
+        }
         return result?.result?.value;
     }
 }
