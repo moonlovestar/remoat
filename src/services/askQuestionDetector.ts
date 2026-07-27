@@ -110,10 +110,30 @@ const DETECT_ASK_QUESTION_SCRIPT = `(() => {
                     options.push(t);
                 };
 
-                // 1) Structured option elements inside the card container.
-                const optEls = Array.from(scrapeRoot.querySelectorAll(OPTION_SELECTORS))
-                    .filter((el) => isVisible(el) && el.children.length <= 8);
-                for (const el of optEls) pushOpt(cleanText(el));
+                // 1a) Radiogroup/label rows — Antigravity's ACTUAL multiple-choice
+                //     shape: <div role=radiogroup> containing <label><input>...
+                //     <span>N</span><span>Label</span></label> rows. Generic
+                //     OPTION_SELECTORS miss <label>, and the text fallback fails
+                //     because 'N'+'Label' concatenate with no delimiter. Take the
+                //     label text, strip a bare leading ordinal, skip the textarea-
+                //     only 'Other' row (it has no fixed label to relay).
+                const radioLabels = Array.from(scrapeRoot.querySelectorAll('[role=\"radiogroup\"] label, [role=\"radiogroup\"] [role=\"radio\"]'))
+                    .filter((el) => isVisible(el));
+                for (const el of radioLabels) {
+                    if (el.querySelector && el.querySelector('textarea, input[type=\"text\"]')) continue;
+                    let t = cleanText(el);
+                    // Strip a bare leading ordinal digit (e.g. '1Python' -> 'Python',
+                    // '2 JavaScript' -> 'JavaScript') as well as '1.'/'1)' forms.
+                    t = t.replace(/^\\s*\\d+\\s*[\\.)\\-:]?\\s*/, '').trim();
+                    pushOpt(t);
+                }
+
+                // 1b) Generic structured option elements inside the card container.
+                if (options.length === 0) {
+                    const optEls = Array.from(scrapeRoot.querySelectorAll(OPTION_SELECTORS))
+                        .filter((el) => isVisible(el) && el.children.length <= 8);
+                    for (const el of optEls) pushOpt(cleanText(el));
+                }
 
                 // 2) Fallback: split container text on ordinal markers ("1.", "2)", ...)
                 //    so each option ends where the next ordinal begins (not at Skip/Submit).
@@ -249,6 +269,52 @@ const buildSetAndReadScript = (value: string) => `(() => {
     box.textContent = val;
     box.dispatchEvent(new InputEvent('input', { bubbles: true, data: val, inputType: 'insertText' }));
     return { ok: true, value: (box.innerText || box.textContent || '') };
+})()`;
+
+/**
+ * For a RADIOGROUP multiple-choice card, click the option whose label matches
+ * the given text (case/space/punct-insensitive). Antigravity renders these as
+ * <div role=radiogroup> containing <label><input type=radio>...<span>N</span>
+ * <span>Label</span></label> rows; Submit stays disabled until a radio is
+ * selected, so for these cards we must CLICK the row, not type into a box.
+ * Prefers 1-based index when provided (exact position), else matches by label.
+ * Returns {ok:true, clicked:'<label>'} on success so the caller can verify.
+ */
+const buildRadioClickScript = (label: string, index: number) => `(() => {
+    const normalize = (text) => (text || '').toLowerCase().replace(/[^\\w\\s,]/g, ' ').replace(/\\s+/g, ' ').trim();
+    const isVisible = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
+    const groups = Array.from(document.querySelectorAll('[role=\"radiogroup\"]')).filter(isVisible);
+    if (!groups.length) return { ok: false, error: 'no radiogroup' };
+    // Use the last visible radiogroup (the active card's), collect its rows.
+    const group = groups[groups.length - 1];
+    let rows = Array.from(group.querySelectorAll('label, [role=\"radio\"]')).filter(isVisible);
+    // Drop rows that are the free-text 'Other' entry (contain a textarea/input).
+    const labelRows = rows.filter((el) => !(el.querySelector && el.querySelector('textarea, input[type=\"text\"]')));
+    if (!labelRows.length) return { ok: false, error: 'no label rows' };
+    const want = normalize(${JSON.stringify(label)});
+    const idx = ${index};
+    let target = null;
+    // 1) Positional index wins for numeric replies (most reliable): the user's
+    //    "3" maps to the 3rd option regardless of label-substring ambiguity
+    //    (e.g. "java" would loosely match "javascript").
+    if (idx >= 1 && idx <= labelRows.length) target = labelRows[idx - 1];
+    // 2) Else match by EXACT normalized label (strip any leading ordinal digit).
+    //    Exact-only to avoid "java" matching "javascript" or "c" matching others.
+    if (!target && want) {
+        for (const el of labelRows) {
+            let t = normalize((el.innerText || el.textContent || ''));
+            t = t.replace(/^\\s*\\d+\\s*/, '').trim();
+            if (t && t === want) { target = el; break; }
+        }
+    }
+    if (!target) return { ok: false, error: 'no matching option', rows: labelRows.length };
+    // Click the radio input if present, else the row itself.
+    const input = target.querySelector && target.querySelector('input[type=\"radio\"], input');
+    const clickEl = input || target;
+    try { clickEl.click(); } catch (e) { try { target.click(); } catch (e2) {} }
+    if (input && !input.checked) { try { input.checked = true; input.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {} }
+    const clickedText = (target.innerText || target.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 60);
+    return { ok: true, clicked: clickedText };
 })()`;
 
 /**
@@ -433,6 +499,25 @@ export class AskQuestionDetector {
                 logger.info(`[AskQuestionDetector] Numeric reply "${trimmed}" out of range (1..${this.lastOptions.length}); sending as-is`);
             }
         }
+
+        // RADIOGROUP path first: if this is a multiple-choice card, clicking the
+        // matching option is the ONLY way to submit (Submit stays disabled until a
+        // radio is selected; there is no free-text box to type into). Map the
+        // 1-based reply index when the user replied with a bare number.
+        const radioIdx = /^\d+$/.test(trimmed) ? parseInt(trimmed, 10) : -1;
+        const radioRes = await this.evaluateInContext(buildRadioClickScript(answer, radioIdx), contextId);
+        if (radioRes?.ok === true) {
+            logger.info(`[AskQuestionDetector] radio option clicked ctx ${contextId}: ${JSON.stringify(radioRes)}`);
+            await new Promise((resolve) => setTimeout(resolve, 150));
+            const submitClickedR = await this.evaluateInContext(buildClickScript('Submit'), contextId);
+            if (submitClickedR?.ok !== true) {
+                await this.pressEnter();
+            }
+            this.cardActive = false;
+            this.lastDetectedContextId = undefined;
+            return { ok: true };
+        }
+        logger.info(`[AskQuestionDetector] no radiogroup match (${JSON.stringify(radioRes)}); trying free-text path`);
 
         const focused = await this.evaluateInContext(FOCUS_FREE_TEXT_INPUT_SCRIPT, contextId);
         if (focused?.ok !== true) {
