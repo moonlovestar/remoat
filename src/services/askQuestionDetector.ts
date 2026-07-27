@@ -132,10 +132,35 @@ const DETECT_ASK_QUESTION_SCRIPT = `(() => {
                     for (const seg of parts) pushOpt(seg);
                 }
 
-                // Diagnostic dump of the card container so we can refine option
-                // scraping from real DOM if the selectors miss. Bounded small to
-                // keep the Runtime.evaluate return payload serializable.
-                cardDump = (scrapeRoot.outerHTML || '').slice(0, 2500);
+                // Diagnostic dump: a CLASS/STYLE/SVG-STRIPPED structural
+                // skeleton of the card. Raw outerHTML is useless here because a
+                // single markdown wrapper carries a ~2KB Tailwind className that
+                // eats the whole budget before the option/question structure is
+                // reached. This skeleton keeps tag + role/aria + own trimmed text.
+                const skel = (el, depth) => {
+                    if (!el || depth > 6) return '';
+                    const tag = (el.tagName || '').toLowerCase();
+                    if (tag === 'svg' || tag === 'path' || tag === 'style' || tag === 'script') return '';
+                    const role = el.getAttribute && el.getAttribute('role');
+                    const aria = el.getAttribute && el.getAttribute('aria-label');
+                    const ti = el.getAttribute && el.getAttribute('tabindex');
+                    // own text = direct text nodes only (not descendants)
+                    let own = '';
+                    for (const n of Array.from(el.childNodes)) {
+                        if (n.nodeType === 3) own += n.textContent;
+                    }
+                    own = own.replace(/\\s+/g, ' ').trim().slice(0, 60);
+                    let head = tag;
+                    if (role) head += '[role=' + role + ']';
+                    if (ti !== null && ti !== undefined) head += '[ti=' + ti + ']';
+                    if (aria) head += '[aria=' + aria.slice(0, 30) + ']';
+                    if (own) head += ' "' + own + '"';
+                    let out = head;
+                    const kids = Array.from(el.children).map((c) => skel(c, depth + 1)).filter(Boolean);
+                    if (kids.length) out += '{' + kids.join(',') + '}';
+                    return out;
+                };
+                cardDump = skel(scrapeRoot, 0).slice(0, 2500);
             } catch (scrapeErr) {
                 options = [];
                 cardDump = 'scrape-error: ' + (scrapeErr && scrapeErr.message ? scrapeErr.message : String(scrapeErr));
