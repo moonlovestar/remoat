@@ -76,16 +76,76 @@ const DETECT_ASK_QUESTION_SCRIPT = `(() => {
 const DETECT_ASK_QUESTION_GONE_SCRIPT = DETECT_ASK_QUESTION_SCRIPT;
 
 /**
- * Focus the most recently-rendered visible free-text input so subsequent
- * Input.insertText lands in the question's answer box.
+ * Locate the question card's OWN free-text box — the editable that lives inside
+ * the same small container as the Skip/Submit button pair — and focus it.
+ *
+ * CRITICAL: do NOT just grab the last visible editable in the document. The main
+ * chat composer at the bottom of the panel is also a visible editable and is
+ * almost always the LAST one in DOM order, so `candidates[last]` targets the
+ * composer, not the card. Text then lands in the composer while the card's box
+ * stays empty → Submit sends an empty answer (observed live). Anchor to the card
+ * container exactly like the detection script does.
+ *
+ * Also stashes the resolved element on window.__remoatAskBox so the value-set +
+ * read-back steps operate on the SAME element without re-querying.
  */
 const FOCUS_FREE_TEXT_INPUT_SCRIPT = `(() => {
+    const normalize = (text) => (text || '').toLowerCase().replace(/[^\\w\\s,]/g, ' ').replace(/\\s+/g, ' ').trim();
     const isVisible = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
-    const candidates = Array.from(document.querySelectorAll('textarea, [contenteditable="true"], input[type="text"]')).filter(isVisible);
-    const el = candidates[candidates.length - 1];
-    if (!el) return { ok: false, error: 'No free-text input found for ask-question card' };
-    el.focus();
-    return { ok: true };
+    const CLICKABLE_SELECTORS = 'button, [role="button"]';
+    const EDITABLE_SELECTORS = 'textarea, [contenteditable="true"], [role="textbox"], input[type="text"]';
+
+    const btns = Array.from(document.querySelectorAll(CLICKABLE_SELECTORS)).filter(isVisible);
+    const submitBtn = btns.find((b) => normalize(b.textContent || '') === 'submit');
+    if (!submitBtn) return { ok: false, error: 'Submit button not found (card may have closed)' };
+
+    // Walk up from Submit to the small container that also holds a sibling Skip
+    // button, then find the editable box INSIDE that container.
+    let anc = submitBtn.parentElement;
+    for (let i = 0; i < 6 && anc && anc !== document.body; i++) {
+        const hasSkip = Array.from(anc.querySelectorAll(CLICKABLE_SELECTORS))
+            .filter(isVisible)
+            .some((b) => normalize(b.textContent || '') === 'skip');
+        if (hasSkip) {
+            const editable = Array.from(anc.querySelectorAll(EDITABLE_SELECTORS)).filter(isVisible);
+            const box = editable[editable.length - 1];
+            if (!box) { anc = anc.parentElement; continue; }
+            window.__remoatAskBox = box;
+            box.focus();
+            return { ok: true, tag: box.tagName, ce: box.getAttribute && box.getAttribute('contenteditable') };
+        }
+        anc = anc.parentElement;
+    }
+    return { ok: false, error: 'Card free-text box not found in Skip/Submit container' };
+})()`;
+
+/**
+ * Set the value of the previously-focused card box (window.__remoatAskBox) and
+ * fire the events React needs to register the change, then read the value back.
+ *
+ * Antigravity's box is a React-controlled input: CDP Input.insertText updates the
+ * DOM value but React may not see it unless we use the native value setter +
+ * dispatch a bubbling 'input' event (and 'change' for good measure). For
+ * contenteditable, set textContent + dispatch input. Returns the box's actual
+ * text so the caller can VERIFY the answer landed before clicking Submit.
+ */
+const buildSetAndReadScript = (value: string) => `(() => {
+    const box = window.__remoatAskBox;
+    if (!box) return { ok: false, error: 'Card box reference lost' };
+    const val = ${JSON.stringify(value)};
+    box.focus();
+    if (box.tagName === 'TEXTAREA' || box.tagName === 'INPUT') {
+        const proto = box.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value') && Object.getOwnPropertyDescriptor(proto, 'value').set;
+        if (setter) { setter.call(box, val); } else { box.value = val; }
+        box.dispatchEvent(new Event('input', { bubbles: true }));
+        box.dispatchEvent(new Event('change', { bubbles: true }));
+        return { ok: true, value: box.value };
+    }
+    // contenteditable / role=textbox
+    box.textContent = val;
+    box.dispatchEvent(new InputEvent('input', { bubbles: true, data: val, inputType: 'insertText' }));
+    return { ok: true, value: (box.innerText || box.textContent || '') };
 })()`;
 
 /**
@@ -250,9 +310,33 @@ export class AskQuestionDetector {
         if (focused?.ok !== true) {
             return { ok: false, error: focused?.error || 'Failed to focus free-text input' };
         }
+        logger.info(`[AskQuestionDetector] focused card box ctx ${contextId}: ${JSON.stringify(focused)}`);
 
-        await this.cdpService.call('Input.insertText', { text });
-        await new Promise((resolve) => setTimeout(resolve, 150));
+        // Primary path: set the value via the native setter + input/change events so
+        // React registers it, then read the box's value back to VERIFY it landed.
+        const setRes = await this.evaluateInContext(buildSetAndReadScript(text), contextId);
+        let landed = setRes?.ok === true && typeof setRes.value === 'string' && setRes.value.length > 0;
+        logger.info(`[AskQuestionDetector] set-and-read result: ${JSON.stringify(setRes)} (landed=${landed})`);
+
+        // Fallback: if the JS setter didn't take, try the CDP keystroke path into
+        // the (still-focused) box, then re-read to confirm.
+        if (!landed) {
+            await this.cdpService.call('Input.insertText', { text });
+            await new Promise((resolve) => setTimeout(resolve, 150));
+            const readRes = await this.evaluateInContext(
+                `(() => { const b = window.__remoatAskBox; if (!b) return { ok:false }; return { ok:true, value: (b.value !== undefined ? b.value : (b.innerText || b.textContent || '')) }; })()`,
+                contextId,
+            );
+            landed = readRes?.ok === true && typeof readRes.value === 'string' && readRes.value.length > 0;
+            logger.info(`[AskQuestionDetector] insertText fallback read: ${JSON.stringify(readRes)} (landed=${landed})`);
+        }
+
+        // Do NOT click Submit on an empty box — that's exactly the empty-answer bug.
+        if (!landed) {
+            return { ok: false, error: 'Answer text did not land in the card free-text box (box empty after injection)' };
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
 
         const submitClicked = await this.evaluateInContext(buildClickScript('Submit'), contextId);
         if (submitClicked?.ok !== true) {
