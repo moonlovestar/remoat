@@ -39,7 +39,7 @@ export interface AskQuestionDetectorOptions {
  *     no sibling "Skip" button)
  */
 const DETECT_ASK_QUESTION_SCRIPT = `(() => {
-    const normalize = (text) => (text || '').toLowerCase().replace(/[^\\\\w\\\\s,]/g, ' ').replace(/\\\\s+/g, ' ').trim();
+    const normalize = (text) => (text || '').toLowerCase().replace(/[^\\w\\s,]/g, ' ').replace(/\\s+/g, ' ').trim();
     const isVisible = (el) => el.offsetParent !== null || (el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0);
     const CLICKABLE_SELECTORS = 'button, [role="button"]';
 
