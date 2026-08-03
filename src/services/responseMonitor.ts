@@ -369,6 +369,21 @@ export const RESPONSE_SELECTORS = {
             }
         }
 
+        // --- Stuck embedded browser/webview detection ---
+        // Antigravity opens an embedded webview/iframe when its agent decides to
+        // "browse" a URL (e.g. a YouTube link the user pasted). Video/media
+        // pages frequently never signal load-complete inside that webview, so
+        // the surrounding UI stays isGenerating=true indefinitely. We can't see
+        // inside the webview's own document (cross-origin), but we CAN detect
+        // that one is present and has stopped changing size/attributes, which
+        // is a strong proxy for "stuck rendering something, not actually
+        // computing a response".
+        let webviewOpen = false;
+        for (const scope of scopes) {
+            const wv = scope.querySelector('webview, iframe[src], [class*="browser-preview"], [class*="simple-browser"]');
+            if (wv) { webviewOpen = true; break; }
+        }
+
         // --- Quota error ---
         let quotaError = false;
         const scope = panel || document;
@@ -560,7 +575,7 @@ export const RESPONSE_SELECTORS = {
             }
         }
 
-        return { isGenerating, quotaError, planningActive, approvalActive, responseText, processLogs };
+        return { isGenerating, quotaError, planningActive, approvalActive, responseText, processLogs, webviewOpen };
     })()`,
     /** Quota error detection — text-based h3 span match first, class-based fallback second */
     QUOTA_ERROR: `(() => {
@@ -731,6 +746,16 @@ export class ResponseMonitor {
     /** Consecutive WebSocket error count — stops monitor after threshold */
     private consecutiveWsErrors: number = 0;
     /**
+     * Consecutive polls where an embedded webview/iframe (Antigravity's "open
+     * URL in browser" tool-use surface) was detected AND isGenerating was
+     * still true with no text progress. Used to short-circuit the full
+     * maxDurationMs timeout when a video-link browse action is clearly
+     * hung — see WEBVIEW_STUCK_THRESHOLD below.
+     */
+    private webviewStuckPolls: number = 0;
+    /** Polls of no-progress-while-webview-open before declaring "stuck" (default ~40s at 2s interval) */
+    private readonly webviewStuckThreshold: number = 20;
+    /**
      * True while an approval/permission dialog was active in the previous poll.
      * Used to detect the transition approval→generating so we can discard the
      * pre-approval lastText and wait for the fresh post-approval response.
@@ -796,6 +821,7 @@ export class ResponseMonitor {
         this.generationStarted = passive;
         this.currentPhase = passive ? 'generating' : 'waiting';
         this.stopGoneCount = 0;
+        this.webviewStuckPolls = 0;
         this.quotaDetected = false;
         this.planningActiveDiagDone = false;
         this.seenProcessLogKeys = new Set();
@@ -1047,6 +1073,7 @@ export class ResponseMonitor {
             let quotaDetected: boolean;
             let planningActive: boolean;
             let approvalActive: boolean;
+            let webviewOpen: boolean = false;
             let currentText: string | null = null;
             let structuredHandledLogs = false;
 
@@ -1062,6 +1089,7 @@ export class ResponseMonitor {
                 quotaDetected = !!combined.quotaError;
                 planningActive = !!combined.planningActive;
                 approvalActive = !!combined.approvalActive;
+                webviewOpen = !!combined.webviewOpen;
 
                 // Try structured extraction first
                 if (structuredResult) {
@@ -1122,6 +1150,7 @@ export class ResponseMonitor {
                 quotaDetected = !!combined.quotaError;
                 planningActive = !!combined.planningActive;
                 approvalActive = !!combined.approvalActive;
+                webviewOpen = !!combined.webviewOpen;
                 currentText = typeof combined.responseText === 'string' ? combined.responseText.trim() || null : null;
                 this.lastExtractionSource = 'legacy';
 
@@ -1189,6 +1218,36 @@ export class ResponseMonitor {
                     logger.info('[ResponseMonitor] New generation detected after approval — cleared stale lastText');
                 }
                 this.stopGoneCount = 0;
+            }
+
+            // --- Stuck webview watchdog ---
+            // An embedded browser/webview (Antigravity's "open URL" tool-use surface,
+            // e.g. a YouTube link) is open AND no new response text has appeared while
+            // still isGenerating. Antigravity never emits a distinct "browsing" phase we
+            // can detect directly, but this combination (webview present + generating +
+            // no text delta) reliably means the tool call is stuck rendering a page that
+            // will never finish loading — not that a response is actually being computed.
+            // We short-circuit here instead of waiting out the full maxDurationMs (30 min)
+            // so the user gets a fast, honest timeout instead of a silent multi-minute hang.
+            if (webviewOpen && isGenerating && currentText === this.lastText) {
+                this.webviewStuckPolls++;
+                if (this.webviewStuckPolls === 1) {
+                    logger.info('[ResponseMonitor] Embedded webview detected while generating with no text progress — starting stuck-webview watchdog');
+                }
+                if (this.webviewStuckPolls >= this.webviewStuckThreshold) {
+                    logger.warn(`[ResponseMonitor] Webview appears stuck (no progress for ${this.webviewStuckPolls * this.pollIntervalMs / 1000}s while a browser/webview was open) — forcing early timeout instead of waiting out maxDurationMs`);
+                    const lastText = this.lastText ?? '';
+                    this.setPhase('timeout', lastText);
+                    await this.stop();
+                    try {
+                        await Promise.resolve(this.onTimeout?.(lastText));
+                    } catch (error) {
+                        logger.debug('[ResponseMonitor] onTimeout callback error (webview watchdog):', error);
+                    }
+                    return;
+                }
+            } else {
+                this.webviewStuckPolls = 0;
             }
 
             // Handle quota detection

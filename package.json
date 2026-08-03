@@ -61,6 +61,7 @@
     "dotenv": "^17.3.1",
     "grammy": "^1.40.1",
     "node-cron": "^4.2.1",
+    "playwright": "^1.62.1",
     "ws": "^8.19.0"
   },
   "optionalDependencies": {

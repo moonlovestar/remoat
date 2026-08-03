@@ -23,6 +23,7 @@ import { CdpService } from '../services/cdpService';
 import { ChatSessionService } from '../services/chatSessionService';
 import { ResponseMonitor, RESPONSE_SELECTORS } from '../services/responseMonitor';
 import { ensureAntigravityRunning } from '../services/antigravityLauncher';
+import { resolveLinksInPrompt } from '../services/linkResolver';
 import { getAntigravityCdpHint } from '../utils/pathUtils';
 import { AutoAcceptService } from '../services/autoAcceptService';
 import { PromptDispatcher } from '../services/promptDispatcher';
@@ -499,20 +500,33 @@ async function sendPromptToAntigravity(
         }
 
         let injectResult;
+        // Resolve video/heavy-preview links (YouTube, TikTok, Vimeo, etc.) BEFORE
+        // handing the prompt to Antigravity. Antigravity's agent will try to open
+        // any bare URL in its own embedded webview; video platforms never emit a
+        // clean "page loaded" signal there, so it hangs indefinitely and Remoat's
+        // ResponseMonitor just waits out the full timeout watching a stuck Stop
+        // button. We pre-resolve these links ourselves via a short-lived headless
+        // Playwright browser and swap in a text annotation, so Antigravity never
+        // attempts the live-open in the first place. Best-effort: on failure or
+        // timeout the original URL passes through unchanged.
+        const resolvedPrompt = await resolveLinksInPrompt(prompt).catch((e) => {
+            logger.debug('[sendPrompt] Link resolution failed (best-effort, using raw prompt):', e);
+            return prompt;
+        });
         if (inboundImages.length > 0) {
-            injectResult = await cdp.injectMessageWithImageFiles(prompt, inboundImages.map(i => i.localPath));
+            injectResult = await cdp.injectMessageWithImageFiles(resolvedPrompt, inboundImages.map(i => i.localPath));
             if (!injectResult.ok) {
                 await sendEmbed(t('🖼️ Attached image fallback'), t('Failed to attach image directly, resending via URL reference.'));
-                injectResult = await cdp.injectMessage(buildPromptWithAttachmentUrls(prompt, inboundImages));
+                injectResult = await cdp.injectMessage(buildPromptWithAttachmentUrls(resolvedPrompt, inboundImages));
             }
         } else if (inboundFiles.length > 0) {
-            injectResult = await cdp.injectMessageWithFiles(prompt, inboundFiles.map(f => f.localPath));
+            injectResult = await cdp.injectMessageWithFiles(resolvedPrompt, inboundFiles.map(f => f.localPath));
             if (!injectResult.ok) {
                 await sendEmbed('📎 Attached file fallback', 'Failed to attach file directly, resending as text reference.');
-                injectResult = await cdp.injectMessage(buildPromptWithFileRefs(prompt, inboundFiles));
+                injectResult = await cdp.injectMessage(buildPromptWithFileRefs(resolvedPrompt, inboundFiles));
             }
         } else {
-            injectResult = await cdp.injectMessage(prompt);
+            injectResult = await cdp.injectMessage(resolvedPrompt);
         }
 
         if (!injectResult.ok) {
